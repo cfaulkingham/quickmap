@@ -1,0 +1,776 @@
+// Nominatim search, OSRM routes, and Web Mercator tiles for QuickMap.
+// Qt-free so it can be unit tested under node.
+
+var USER_AGENT = "QuickMap/1.0 (io.github.cfaulkingham.quickmap; colin.faulkingham@gmail.com)"
+var TILE_SIZE = 256
+var MAX_TILE_COLS = 2
+var MAX_TILE_ROWS = 1
+var MODAL_TILE_COLS = 4
+var MODAL_TILE_ROWS = 3
+var MIN_ZOOM = 2
+var MAX_ZOOM = 18
+
+function userAgent() {
+  return USER_AGENT
+}
+
+function trim(text) {
+  return String(text == null ? "" : text).replace(/^\s+|\s+$/g, "")
+}
+
+function shQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'"
+}
+
+function clamp(n, lo, hi) {
+  n = Number(n)
+  if (!isFinite(n)) return lo
+  if (n < lo) return lo
+  if (n > hi) return hi
+  return n
+}
+
+function parseCoords(text) {
+  var m = trim(text).match(/^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/)
+  if (!m) return null
+  var a = Number(m[1])
+  var b = Number(m[2])
+  if (!isFinite(a) || !isFinite(b)) return null
+  // OSM order is lat, lon. Swap only when the first number cannot be a latitude.
+  if (Math.abs(a) > 90 && Math.abs(a) <= 180 && Math.abs(b) <= 90)
+    return { lat: b, lon: a }
+  if (Math.abs(a) <= 90 && Math.abs(b) <= 180) return { lat: a, lon: b }
+  return null
+}
+
+function searchUrl(query, limit) {
+  var q = encodeURIComponent(trim(query))
+  var n = parseInt(limit, 10)
+  if (!isFinite(n) || n < 1) n = 5
+  if (n > 8) n = 8
+  return "https://nominatim.openstreetmap.org/search?q=" + q
+    + "&format=jsonv2&limit=" + n
+}
+
+function placeName(row) {
+  if (!row) return "Place"
+  if (row.name) return String(row.name)
+  var display = String(row.display_name || "")
+  var comma = display.indexOf(",")
+  return comma > 0 ? trim(display.slice(0, comma)) : (display || "Place")
+}
+
+function placeDescription(row) {
+  if (!row) return ""
+  var name = placeName(row)
+  var display = String(row.display_name || "")
+  if (display.indexOf(name) === 0)
+    display = trim(display.slice(name.length).replace(/^,/, ""))
+  return display
+}
+
+function parseSearchResults(raw) {
+  try {
+    var data = JSON.parse(String(raw || "[]"))
+    if (!data || !data.length) return []
+    var out = []
+    for (var i = 0; i < data.length; i++) {
+      var row = data[i]
+      if (!row) continue
+      var lat = parseFloat(row.lat)
+      var lon = parseFloat(row.lon)
+      if (!isFinite(lat) || !isFinite(lon)) continue
+      out.push({
+        name: placeName(row),
+        description: placeDescription(row),
+        lat: lat,
+        lon: lon,
+        type: String(row.type || row.addresstype || "")
+      })
+    }
+    return out
+  } catch (e) {
+    return []
+  }
+}
+
+function coordsPlace(lat, lon) {
+  lat = Number(lat)
+  lon = Number(lon)
+  if (!isFinite(lat) || !isFinite(lon)) return null
+  var name = lat.toFixed(5) + ", " + lon.toFixed(5)
+  return { name: name, description: "Coordinates", lat: lat, lon: lon, type: "coordinates" }
+}
+
+function parseLocationFile(raw) {
+  try {
+    var data = JSON.parse(String(raw || ""))
+    if (!data || typeof data !== "object") return null
+    var lat = parseFloat(data.latitude)
+    var lon = parseFloat(data.longitude)
+    if (!isFinite(lat) || !isFinite(lon)) return null
+    return {
+      name: trim(data.name) || "Current location",
+      description: "Weather location",
+      lat: lat,
+      lon: lon,
+      type: "current"
+    }
+  } catch (e) {
+    return null
+  }
+}
+
+function parseIpLocation(raw) {
+  try {
+    var data = JSON.parse(String(raw || "{}"))
+    if (!data || data.success === false) return null
+    var lat = parseFloat(data.latitude)
+    var lon = parseFloat(data.longitude)
+    if (!isFinite(lat) || !isFinite(lon)) return null
+    var parts = [data.city, data.region, data.country]
+    var name = []
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i]) name.push(String(parts[i]))
+    }
+    return {
+      name: name.length ? name.join(", ") : "Current location",
+      description: "Estimated from IP",
+      lat: lat,
+      lon: lon,
+      type: "current"
+    }
+  } catch (e) {
+    return null
+  }
+}
+
+function routeProfile(mode) {
+  return mode === "walk" ? "foot" : "driving"
+}
+
+function routeUrl(mode, from, to) {
+  if (!from || !to) return ""
+  var a = Number(from.lon) + "," + Number(from.lat)
+  var b = Number(to.lon) + "," + Number(to.lat)
+  return "https://router.project-osrm.org/route/v1/" + routeProfile(mode)
+    + "/" + a + ";" + b + "?overview=simplified&geometries=geojson&steps=true"
+}
+
+function capitalize(text) {
+  text = String(text || "")
+  if (!text) return ""
+  return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
+function formatManeuver(step) {
+  step = step || {}
+  var m = step.maneuver || {}
+  var type = String(m.type || "")
+  var modifier = String(m.modifier || "")
+  var name = trim(step.name)
+  var onto = name ? " onto " + name : ""
+
+  if (type === "depart") return name ? "Head onto " + name : "Depart"
+  if (type === "arrive") return name ? "Arrive at " + name : "Arrive"
+  if (type === "roundabout" || type === "rotary")
+    return "Enter the roundabout" + onto
+  if (type === "exit roundabout" || type === "exit rotary")
+    return "Exit the roundabout" + onto
+  if (type === "merge") return "Merge" + onto
+  if (type === "fork") return (modifier ? "Keep " + modifier : "Keep going") + onto
+  if (type === "end of road") return (modifier ? "Turn " + modifier : "Turn") + onto
+  if (type === "continue" || type === "new name")
+    return name ? "Continue on " + name : "Continue"
+  if (type === "notification") return name ? "Continue on " + name : "Continue"
+
+  var turn = ""
+  if (modifier === "straight") turn = "Continue straight"
+  else if (modifier === "uturn") turn = "Make a U-turn"
+  else if (modifier) turn = "Turn " + modifier
+  else if (type) turn = capitalize(type)
+  else turn = "Continue"
+
+  if (type === "ramp" || type === "on ramp") turn = "Take the ramp"
+  if (type === "off ramp") turn = "Take the off-ramp"
+  return turn + onto
+}
+
+function parseRoute(raw) {
+  try {
+    var data = JSON.parse(String(raw || "{}"))
+    if (!data || data.code !== "Ok" || !data.routes || !data.routes[0]) return null
+    var route = data.routes[0]
+    var steps = []
+    var legs = route.legs || []
+    for (var i = 0; i < legs.length; i++) {
+      var list = legs[i].steps || []
+      for (var j = 0; j < list.length; j++) {
+        var step = list[j] || {}
+        steps.push({
+          instruction: formatManeuver(step),
+          distance: Number(step.distance) || 0,
+          duration: Number(step.duration) || 0,
+          name: trim(step.name)
+        })
+      }
+    }
+    var geom = route.geometry && route.geometry.coordinates ? route.geometry.coordinates : []
+    return {
+      distance: Number(route.distance) || 0,
+      duration: Number(route.duration) || 0,
+      coordinates: geom,
+      steps: steps
+    }
+  } catch (e) {
+    return null
+  }
+}
+
+function useImperial(localeName) {
+  var name = String(localeName || "").replace(".", "_")
+  return /^en[_-]US($|[_.-])/i.test(name)
+    || /^en[_-]LR($|[_.-])/i.test(name)
+    || /^my($|[_.-])/i.test(name)
+}
+
+function formatDistance(meters, imperial) {
+  var m = Number(meters)
+  if (!isFinite(m) || m < 0) return ""
+  if (imperial) {
+    var feet = m * 3.28084
+    if (feet < 528) return Math.round(feet) + " ft"
+    var miles = m / 1609.344
+    return (miles < 10 ? miles.toFixed(1) : String(Math.round(miles))) + " mi"
+  }
+  if (m < 1000) return Math.round(m) + " m"
+  var km = m / 1000
+  return (km < 10 ? km.toFixed(1) : String(Math.round(km))) + " km"
+}
+
+function formatDuration(seconds) {
+  var s = Math.round(Number(seconds))
+  if (!isFinite(s) || s < 0) return ""
+  if (s < 60) return s + "s"
+  var minutes = Math.round(s / 60)
+  if (minutes < 60) return minutes + " min"
+  var hours = Math.floor(minutes / 60)
+  var rest = minutes % 60
+  return rest ? hours + " h " + rest + " min" : hours + " h"
+}
+
+function formatSummary(route, imperial) {
+  if (!route) return ""
+  var dist = formatDistance(route.distance, imperial)
+  var dur = formatDuration(route.duration)
+  if (dist && dur) return dist + " · " + dur
+  return dist || dur
+}
+
+function modeLabel(mode) {
+  if (mode === "walk") return "Walking"
+  if (mode === "drive") return "Driving"
+  return "Place"
+}
+
+function directionsTitle(origin, dest, place, mode) {
+  if (mode === "drive" || mode === "walk") {
+    var fromName = origin && origin.name ? origin.name : "Start"
+    var toName = dest && dest.name ? dest.name : "Destination"
+    return fromName + " → " + toName
+  }
+  return place && place.name ? place.name : "Map"
+}
+
+function formatDirectionsText(route, origin, dest, mode, imperial) {
+  var lines = []
+  lines.push(modeLabel(mode) + " directions")
+  lines.push(directionsTitle(origin, dest, null, mode))
+  var summary = formatSummary(route, imperial)
+  if (summary) lines.push(summary)
+  lines.push("")
+  var steps = route && route.steps ? route.steps : []
+  for (var i = 0; i < steps.length; i++) {
+    var dist = steps[i].distance > 0 ? " (" + formatDistance(steps[i].distance, imperial) + ")" : ""
+    lines.push((i + 1) + ". " + steps[i].instruction + dist)
+  }
+  lines.push("")
+  lines.push("© OpenStreetMap contributors")
+  return lines.join("\n")
+}
+
+function escapeHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+}
+
+function formatDirectionsHtml(route, origin, dest, mode, imperial) {
+  var title = escapeHtml(directionsTitle(origin, dest, null, mode))
+  var heading = escapeHtml(modeLabel(mode) + " directions")
+  var summary = escapeHtml(formatSummary(route, imperial))
+  var items = []
+  var steps = route && route.steps ? route.steps : []
+  for (var i = 0; i < steps.length; i++) {
+    var dist = steps[i].distance > 0
+      ? " <span>" + escapeHtml(formatDistance(steps[i].distance, imperial)) + "</span>"
+      : ""
+    items.push("<li>" + escapeHtml(steps[i].instruction) + dist + "</li>")
+  }
+  return "<!doctype html><html><head><meta charset=\"utf-8\"><title>"
+    + heading + "</title><style>"
+    + "body{font:14px/1.45 sans-serif;margin:24px;color:#111}"
+    + "h1{font-size:20px;margin:0 0 4px}p{margin:0 0 16px;color:#444}"
+    + "ol{padding-left:22px}li{margin:0 0 8px}li span{color:#666}"
+    + "@media print{body{margin:12px}}"
+    + "</style></head><body><h1>" + heading + "</h1><p>" + title
+    + (summary ? "<br>" + summary : "") + "</p><ol>" + items.join("")
+    + "</ol><p>© OpenStreetMap contributors</p></body></html>"
+}
+
+function printCommand(txtPath, text) {
+  var py = [
+    "import os, subprocess, sys",
+    "path, text = sys.argv[1:3]",
+    "os.makedirs(os.path.dirname(path) or '.', exist_ok=True)",
+    "open(path, 'w', encoding='utf-8').write(text)",
+    "stat = subprocess.run(['lpstat', '-d'], capture_output=True, text=True)",
+    "info = ((stat.stdout or '') + (stat.stderr or '')).lower()",
+    "if 'no system default' in info or 'no destinations' in info or 'unknown destination' in info:",
+    "    print('NO_PRINTER')",
+    "    raise SystemExit(2)",
+    "job = subprocess.run(['lp', path], capture_output=True, text=True)",
+    "if job.returncode != 0:",
+    "    print((job.stderr or job.stdout or 'PRINT_FAILED').strip() or 'PRINT_FAILED')",
+    "    raise SystemExit(1)",
+    "print('PRINTED')"
+  ].join("\n")
+  return ["python3", "-c", py, txtPath, String(text || "")]
+}
+
+function osmPlaceUrl(lat, lon) {
+  lat = Number(lat)
+  lon = Number(lon)
+  if (!isFinite(lat) || !isFinite(lon)) return ""
+  return "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon
+    + "#map=16/" + lat + "/" + lon
+}
+
+function osmDirectionsUrl(from, to, mode) {
+  if (!from || !to) return ""
+  var engine = mode === "walk" ? "fossgis_osrm_foot" : "fossgis_osrm_car"
+  return "https://www.openstreetmap.org/directions?engine=" + engine
+    + "&route=" + Number(from.lat) + "," + Number(from.lon)
+    + ";" + Number(to.lat) + "," + Number(to.lon)
+}
+
+function openUrl(place, origin, dest, mode) {
+  if (mode === "drive" || mode === "walk") {
+    if (origin && dest) return osmDirectionsUrl(origin, dest, mode)
+  }
+  if (place) return osmPlaceUrl(place.lat, place.lon)
+  if (dest) return osmPlaceUrl(dest.lat, dest.lon)
+  return ""
+}
+
+function webMercatorX(lon, zoom) {
+  return (Number(lon) + 180) / 360 * Math.pow(2, zoom)
+}
+
+function webMercatorY(lat, zoom) {
+  var s = Math.sin(clamp(Number(lat), -85.0511, 85.0511) * Math.PI / 180)
+  s = clamp(s, -0.9999, 0.9999)
+  return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * Math.pow(2, zoom)
+}
+
+function downsampleLine(coords, maxPoints) {
+  coords = coords || []
+  var max = parseInt(maxPoints, 10)
+  if (!isFinite(max) || max < 2) max = 80
+  if (coords.length <= max) return coords.slice()
+  var out = []
+  var step = (coords.length - 1) / (max - 1)
+  for (var i = 0; i < max; i++)
+    out.push(coords[Math.round(i * step)])
+  return out
+}
+
+function emptyView() {
+  return { zoom: 0, tileX: 0, tileY: 0, minTx: 0, minTy: 0, cols: 0, rows: 0, tiles: [] }
+}
+
+function pointsFrom(place, origin, dest, route) {
+  var points = []
+  function add(p) {
+    if (!p || !isFinite(Number(p.lat)) || !isFinite(Number(p.lon))) return
+    points.push({ lat: Number(p.lat), lon: Number(p.lon) })
+  }
+  add(place)
+  add(origin)
+  add(dest)
+  var coords = route && route.coordinates ? route.coordinates : []
+  var sample = downsampleLine(coords, 12)
+  for (var i = 0; i < sample.length; i++) {
+    var c = sample[i]
+    if (c && c.length >= 2) points.push({ lat: Number(c[1]), lon: Number(c[0]) })
+  }
+  return points
+}
+
+function fitView(points, maxCols, maxRows) {
+  points = points || []
+  maxCols = parseInt(maxCols, 10)
+  maxRows = parseInt(maxRows, 10)
+  if (!isFinite(maxCols) || maxCols < 1) maxCols = MAX_TILE_COLS
+  if (!isFinite(maxRows) || maxRows < 1) maxRows = MAX_TILE_ROWS
+  if (!points.length) return emptyView()
+
+  var minLat = 90, maxLat = -90, minLon = 180, maxLon = -180
+  for (var i = 0; i < points.length; i++) {
+    var p = points[i]
+    if (p.lat < minLat) minLat = p.lat
+    if (p.lat > maxLat) maxLat = p.lat
+    if (p.lon < minLon) minLon = p.lon
+    if (p.lon > maxLon) maxLon = p.lon
+  }
+
+  var padLat = Math.max(0.0004, (maxLat - minLat) * 0.18)
+  var padLon = Math.max(0.0004, (maxLon - minLon) * 0.18)
+  minLat -= padLat
+  maxLat += padLat
+  minLon -= padLon
+  maxLon += padLon
+
+  var zoom = 15
+  if (points.length > 1) {
+    for (zoom = 16; zoom >= 2; zoom--) {
+      var w = Math.abs(webMercatorX(maxLon, zoom) - webMercatorX(minLon, zoom))
+      var h = Math.abs(webMercatorY(minLat, zoom) - webMercatorY(maxLat, zoom))
+      if (w <= maxCols - 0.15 && h <= maxRows - 0.15) break
+    }
+  }
+
+  var cx = (webMercatorX(minLon, zoom) + webMercatorX(maxLon, zoom)) / 2
+  var cy = (webMercatorY(minLat, zoom) + webMercatorY(maxLat, zoom)) / 2
+  return viewAt(zoom, cx - maxCols / 2, cy - maxRows / 2, maxCols, maxRows)
+}
+
+function viewAt(zoom, originX, originY, cols, rows) {
+  zoom = Math.round(Number(zoom))
+  if (!isFinite(zoom)) zoom = 15
+  zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM)
+  cols = parseInt(cols, 10)
+  rows = parseInt(rows, 10)
+  if (!isFinite(cols) || cols < 1) cols = MAX_TILE_COLS
+  if (!isFinite(rows) || rows < 1) rows = MAX_TILE_ROWS
+
+  var n = Math.pow(2, zoom)
+  originX = Number(originX)
+  originY = Number(originY)
+  if (!isFinite(originX)) originX = 0
+  if (!isFinite(originY)) originY = 0
+  originX = ((originX % n) + n) % n
+  if (originY < 0) originY = 0
+  if (originY + rows > n) originY = Math.max(0, n - rows)
+
+  var minTx = Math.floor(originX)
+  var minTy = Math.floor(originY)
+  var tileCols = Math.max(1, Math.ceil(originX + cols - minTx - 1e-9))
+  var tileRows = Math.max(1, Math.ceil(originY + rows - minTy - 1e-9))
+
+  var tiles = []
+  for (var row = 0; row < tileRows; row++) {
+    for (var col = 0; col < tileCols; col++) {
+      var x = (minTx + col) % n
+      var y = minTy + row
+      if (y < 0 || y >= n) continue
+      tiles.push({ z: zoom, x: x, y: y, col: col, row: row })
+    }
+  }
+
+  return {
+    zoom: zoom,
+    tileX: originX,
+    tileY: originY,
+    minTx: minTx,
+    minTy: minTy,
+    cols: cols,
+    rows: rows,
+    tiles: tiles
+  }
+}
+
+function panView(view, dxPx, dyPx, width, height) {
+  if (!view || !view.cols || !view.rows) return emptyView()
+  width = Number(width)
+  height = Number(height)
+  if (!width || !height) return view
+  return viewAt(
+    view.zoom,
+    view.tileX - Number(dxPx) / width * view.cols,
+    view.tileY - Number(dyPx) / height * view.rows,
+    view.cols,
+    view.rows
+  )
+}
+
+function zoomView(view, delta, ax, ay, width, height) {
+  if (!view || !view.cols || !view.rows) return emptyView()
+  width = Number(width)
+  height = Number(height)
+  if (!width || !height) return view
+  var newZoom = clamp(view.zoom + Number(delta), MIN_ZOOM, MAX_ZOOM)
+  if (newZoom === view.zoom) return view
+  var fracX = clamp(Number(ax) / width, 0, 1)
+  var fracY = clamp(Number(ay) / height, 0, 1)
+  var worldX = view.tileX + fracX * view.cols
+  var worldY = view.tileY + fracY * view.rows
+  var scale = Math.pow(2, newZoom - view.zoom)
+  return viewAt(
+    newZoom,
+    worldX * scale - fracX * view.cols,
+    worldY * scale - fracY * view.rows,
+    view.cols,
+    view.rows
+  )
+}
+
+function projectOnView(lat, lon, view, width, height) {
+  if (!view || !view.cols || !view.rows) return { x: 0, y: 0 }
+  var mx = webMercatorX(lon, view.zoom)
+  var my = webMercatorY(lat, view.zoom)
+  var dx = mx - view.tileX
+  var n = Math.pow(2, view.zoom)
+  if (dx < -n / 2) dx += n
+  if (dx > n / 2) dx -= n
+  return {
+    x: dx / view.cols * width,
+    y: (my - view.tileY) / view.rows * height
+  }
+}
+
+function tilePath(cacheDir, tile) {
+  return String(cacheDir || "") + "/" + tile.z + "-" + tile.x + "-" + tile.y + ".png"
+}
+
+function tileUrl(tile) {
+  return "https://tile.openstreetmap.org/" + tile.z + "/" + tile.x + "/" + tile.y + ".png"
+}
+
+function wrapTileX(x, zoom) {
+  var n = Math.pow(2, zoom)
+  return ((Number(x) % n) + n) % n
+}
+
+function uniqueTiles(tiles) {
+  var seen = {}
+  var out = []
+  tiles = tiles || []
+  for (var i = 0; i < tiles.length; i++) {
+    var t = tiles[i]
+    if (!t) continue
+    var z = Number(t.z) | 0
+    var x = Number(t.x) | 0
+    var y = Number(t.y) | 0
+    if (z < MIN_ZOOM || z > MAX_ZOOM || x < 0 || y < 0) continue
+    var key = z + "/" + x + "/" + y
+    if (seen[key]) continue
+    seen[key] = true
+    out.push({ z: z, x: x, y: y })
+  }
+  return out
+}
+
+function neighborTiles(view, pad) {
+  if (!view || !view.cols || !view.rows) return []
+  pad = parseInt(pad, 10)
+  if (!isFinite(pad) || pad < 0) pad = 1
+  var n = Math.pow(2, view.zoom)
+  var minX = Math.floor(view.tileX) - pad
+  var minY = Math.floor(view.tileY) - pad
+  var maxX = Math.ceil(view.tileX + view.cols + 1e-9) + pad
+  var maxY = Math.ceil(view.tileY + view.rows + 1e-9) + pad
+  var tiles = []
+  for (var y = minY; y < maxY; y++) {
+    if (y < 0 || y >= n) continue
+    for (var x = minX; x < maxX; x++)
+      tiles.push({ z: view.zoom, x: wrapTileX(x, view.zoom), y: y })
+  }
+  return tiles
+}
+
+function parentTiles(tiles) {
+  var out = []
+  tiles = tiles || []
+  for (var i = 0; i < tiles.length; i++) {
+    var t = tiles[i]
+    if (!t || t.z <= MIN_ZOOM) continue
+    out.push({ z: t.z - 1, x: Math.floor(t.x / 2), y: Math.floor(t.y / 2) })
+  }
+  return out
+}
+
+function childTiles(tiles) {
+  var out = []
+  tiles = tiles || []
+  for (var i = 0; i < tiles.length; i++) {
+    var t = tiles[i]
+    if (!t || t.z >= MAX_ZOOM) continue
+    var x = t.x * 2
+    var y = t.y * 2
+    out.push({ z: t.z + 1, x: x, y: y })
+    out.push({ z: t.z + 1, x: x + 1, y: y })
+    out.push({ z: t.z + 1, x: x, y: y + 1 })
+    out.push({ z: t.z + 1, x: x + 1, y: y + 1 })
+  }
+  return out
+}
+
+function offlineTiles(view, extraDown, extraUp, maxTiles) {
+  if (!view || !view.cols || !view.rows) return []
+  extraDown = parseInt(extraDown, 10)
+  extraUp = parseInt(extraUp, 10)
+  maxTiles = parseInt(maxTiles, 10)
+  if (!isFinite(extraDown) || extraDown < 0) extraDown = 2
+  if (!isFinite(extraUp) || extraUp < 0) extraUp = 2
+  if (!isFinite(maxTiles) || maxTiles < 16) maxTiles = 220
+
+  var z = view.zoom
+  var out = []
+  for (var z2 = z - extraDown; z2 <= z + extraUp; z2++) {
+    if (z2 < MIN_ZOOM || z2 > MAX_ZOOM) continue
+    var scale = Math.pow(2, z2 - z)
+    var pad = z2 === z ? 2 : (z2 < z ? 1 : 0)
+    var x0 = Math.floor(view.tileX * scale) - pad
+    var y0 = Math.floor(view.tileY * scale) - pad
+    var x1 = Math.ceil((view.tileX + view.cols) * scale) + pad
+    var y1 = Math.ceil((view.tileY + view.rows) * scale) + pad
+    var n = Math.pow(2, z2)
+    for (var y = y0; y < y1; y++) {
+      if (y < 0 || y >= n) continue
+      for (var x = x0; x < x1; x++)
+        out.push({ z: z2, x: wrapTileX(x, z2), y: y })
+    }
+  }
+  return uniqueTiles(out).slice(0, maxTiles)
+}
+
+function prefetchTiles(view, maxTiles) {
+  if (!view) return []
+  maxTiles = parseInt(maxTiles, 10)
+  if (!isFinite(maxTiles) || maxTiles < 8) maxTiles = 40
+  var visible = view.tiles || []
+  var all = uniqueTiles(visible
+    .concat(neighborTiles(view, 1))
+    .concat(parentTiles(visible))
+    .concat(childTiles(visible)))
+  if (all.length > maxTiles) all = all.slice(0, maxTiles)
+  return all
+}
+
+function tileFetchScript(cacheDir, tiles, agent) {
+  var lines = [
+    "mkdir -p " + shQuote(cacheDir),
+    "ua=" + shQuote(agent || USER_AGENT),
+    "missf=$(mktemp)",
+    "n=0",
+    "fetch() {",
+    "  [ -s \"$1\" ] && return 0",
+    "  echo 1 > \"$missf\"",
+    "  curl -fsS --max-time 8 -A \"$ua\" -o \"$1\" \"$2\" || rm -f \"$1\"",
+    "}",
+    "slot() { n=$((n+1)); if [ \"$n\" -ge 2 ]; then wait; n=0; fi; }"
+  ]
+  tiles = tiles || []
+  for (var i = 0; i < tiles.length; i++) {
+    var t = tiles[i]
+    var z = Number(t.z) | 0
+    var x = Number(t.x) | 0
+    var y = Number(t.y) | 0
+    if (z < 0 || x < 0 || y < 0) continue
+    var file = shQuote(cacheDir + "/" + z + "-" + x + "-" + y + ".png")
+    var url = shQuote("https://tile.openstreetmap.org/" + z + "/" + x + "/" + y + ".png")
+    lines.push("fetch " + file + " " + url + " & slot")
+  }
+  lines.push("wait")
+  lines.push("if [ -s \"$missf\" ]; then echo 1; else echo 0; fi")
+  lines.push("rm -f \"$missf\"")
+  return lines.join("\n")
+}
+
+function curlCommand(url) {
+  return ["curl", "-fsS", "--max-time", "8", "-A", USER_AGENT, url]
+}
+
+function markersFor(mode, place, origin, dest) {
+  var out = []
+  if (mode === "drive" || mode === "walk") {
+    if (origin) out.push({ lat: origin.lat, lon: origin.lon, role: "from" })
+    if (dest) out.push({ lat: dest.lat, lon: dest.lon, role: "to" })
+    return out
+  }
+  if (place) out.push({ lat: place.lat, lon: place.lon, role: "to" })
+  return out
+}
+
+function moveSuggestion(index, delta, count) {
+  if (!count) return 0
+  var current = parseInt(index, 10)
+  if (!isFinite(current) || current < 0) current = 0
+  var next = current + Number(delta)
+  if (next < 0) return 0
+  if (next > count - 1) return count - 1
+  return next
+}
+
+if (typeof module !== "undefined") {
+  module.exports = {
+    userAgent: userAgent,
+    trim: trim,
+    parseCoords: parseCoords,
+    searchUrl: searchUrl,
+    parseSearchResults: parseSearchResults,
+    coordsPlace: coordsPlace,
+    parseLocationFile: parseLocationFile,
+    parseIpLocation: parseIpLocation,
+    routeProfile: routeProfile,
+    routeUrl: routeUrl,
+    formatManeuver: formatManeuver,
+    parseRoute: parseRoute,
+    useImperial: useImperial,
+    formatDistance: formatDistance,
+    formatDuration: formatDuration,
+    formatSummary: formatSummary,
+    modeLabel: modeLabel,
+    directionsTitle: directionsTitle,
+    formatDirectionsText: formatDirectionsText,
+    formatDirectionsHtml: formatDirectionsHtml,
+    escapeHtml: escapeHtml,
+    printCommand: printCommand,
+    viewAt: viewAt,
+    panView: panView,
+    zoomView: zoomView,
+    osmPlaceUrl: osmPlaceUrl,
+    osmDirectionsUrl: osmDirectionsUrl,
+    openUrl: openUrl,
+    webMercatorX: webMercatorX,
+    webMercatorY: webMercatorY,
+    downsampleLine: downsampleLine,
+    pointsFrom: pointsFrom,
+    fitView: fitView,
+    projectOnView: projectOnView,
+    uniqueTiles: uniqueTiles,
+    neighborTiles: neighborTiles,
+    parentTiles: parentTiles,
+    childTiles: childTiles,
+    prefetchTiles: prefetchTiles,
+    offlineTiles: offlineTiles,
+    tileFetchScript: tileFetchScript,
+    curlCommand: curlCommand,
+    markersFor: markersFor,
+    moveSuggestion: moveSuggestion,
+    emptyView: emptyView
+  }
+}

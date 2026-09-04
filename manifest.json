@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.cfaulkingham.quickmap",
+  "name": "QuickMap",
+  "version": "1.0.0",
+  "author": "Colin Faulkingham",
+  "license": "MIT",
+  "description": "Look up an address or get driving and walking directions from OpenStreetMap.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "QuickMap",
+    "description": "Address lookup and OSM directions",
+    "category": "Tools",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
