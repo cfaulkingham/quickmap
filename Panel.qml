@@ -42,6 +42,7 @@ Panel {
   property string printOutput: ""
   property bool offline: false
   property bool routeQueued: false
+  property bool weatherResolved: false
 
   readonly property var barIdentity: hostWidget || root
   readonly property color contentForeground: bar ? bar.barForeground : Color.foreground
@@ -90,7 +91,7 @@ Panel {
     root.controller.show()
     root.offline = false
     if (root.status === root.offlineSearchMessage) root.status = ""
-    if (!root.currentLocation) root.fetchIpLocation()
+    root.maybeFetchIpLocation()
     Qt.callLater(function() {
       if (!root.opened) return
       setCenterHoverRevealSuppressed(true)
@@ -156,7 +157,10 @@ Panel {
     if (next === "lookup" && !root.place && root.toPlace)
       root.setPlaceOnField("query", root.toPlace)
     if (next === "lookup") root.route = null
-    else root.maybeRoute()
+    else {
+      root.maybeFetchIpLocation()
+      root.maybeRoute()
+    }
     root.refreshMap()
     Qt.callLater(root.focusPrimaryField)
   }
@@ -193,6 +197,7 @@ Panel {
       root.fromPlace = null
       root.suggestions = []
       searchDebounce.stop()
+      root.maybeFetchIpLocation()
       root.maybeRoute()
       root.refreshMap()
       return
@@ -423,9 +428,11 @@ Panel {
     offlineProc.running = true
   }
 
-  function fetchIpLocation() {
-    if (ipProc.running || root.currentLocation) return
-    ipProc.command = Model.curlCommand("https://ipwho.is/")
+  function maybeFetchIpLocation() {
+    if (!Model.shouldFetchIpLocation(root.mode, !!root.currentLocation, root.weatherResolved, root.usingCurrentOrigin))
+      return
+    if (ipProc.running) return
+    ipProc.command = Model.curlCommand("https://ipwho.is/", Model.anonUserAgent())
     ipProc.running = true
   }
 
@@ -458,6 +465,12 @@ Panel {
     onLoaded: {
       var loc = Model.parseLocationFile(text())
       if (loc) root.currentLocation = loc
+      root.weatherResolved = true
+      root.maybeFetchIpLocation()
+    }
+    onLoadFailed: {
+      root.weatherResolved = true
+      root.maybeFetchIpLocation()
     }
   }
 

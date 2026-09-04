@@ -31,7 +31,8 @@ omarchy plugin add https://github.com/cfaulkingham/quickmap.git --enable
   "Offline — search not available" instead of "No results"
 - **Lookup** — type an address, city, or `lat, lon` and press Enter
 - **Drive** / **Walk** — destination in **To**; leave **From** empty to use
-  your current location (Omarchy weather coordinates, or an IP estimate)
+  your current location (Omarchy weather coordinates first; an IP estimate
+  only if that file has none)
 - Arrow keys move through suggestions; Enter selects
 - Click the map (or **Expand** / **View all**) for a larger centered map
 - Drag to pan, scroll or use **+** / **−** to zoom; Escape closes the map

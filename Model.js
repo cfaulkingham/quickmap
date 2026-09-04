@@ -2,6 +2,7 @@
 // Qt-free so it can be unit tested under node.
 
 var USER_AGENT = "QuickMap/1.0 (io.github.cfaulkingham.quickmap; colin.faulkingham@gmail.com)"
+var ANON_USER_AGENT = "QuickMap/1.0 (io.github.cfaulkingham.quickmap)"
 var TILE_SIZE = 256
 var MAX_TILE_COLS = 2
 var MAX_TILE_ROWS = 1
@@ -12,6 +13,15 @@ var MAX_ZOOM = 18
 
 function userAgent() {
   return USER_AGENT
+}
+
+function anonUserAgent() {
+  return ANON_USER_AGENT
+}
+
+function shouldFetchIpLocation(mode, hasLocation, weatherResolved, usingCurrentOrigin) {
+  if (hasLocation || !weatherResolved || !usingCurrentOrigin) return false
+  return mode === "drive" || mode === "walk"
 }
 
 function trim(text) {
@@ -700,8 +710,8 @@ function tileFetchScript(cacheDir, tiles, agent) {
   return lines.join("\n")
 }
 
-function curlCommand(url) {
-  return ["curl", "-fsS", "--max-time", "8", "-A", USER_AGENT, url]
+function curlCommand(url, agent) {
+  return ["curl", "-fsS", "--max-time", "8", "-A", agent || USER_AGENT, url]
 }
 
 function markersFor(mode, place, origin, dest) {
@@ -728,6 +738,8 @@ function moveSuggestion(index, delta, count) {
 if (typeof module !== "undefined") {
   module.exports = {
     userAgent: userAgent,
+    anonUserAgent: anonUserAgent,
+    shouldFetchIpLocation: shouldFetchIpLocation,
     trim: trim,
     parseCoords: parseCoords,
     searchUrl: searchUrl,

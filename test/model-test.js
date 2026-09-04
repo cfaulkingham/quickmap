@@ -53,6 +53,14 @@ assert.strictEqual(Model.parseIpLocation('{"success":false}'), null)
 assert.ok(Model.searchUrl("white house", 5).indexOf("nominatim.openstreetmap.org/search") !== -1)
 assert.ok(Model.searchUrl("a b").indexOf("a%20b") !== -1)
 assert.strictEqual(Model.userAgent().indexOf("QuickMap/1.0"), 0)
+assert.ok(Model.userAgent().indexOf("@") !== -1)
+assert.ok(Model.anonUserAgent().indexOf("@") === -1)
+assert.strictEqual(Model.shouldFetchIpLocation("lookup", false, true, true), false)
+assert.strictEqual(Model.shouldFetchIpLocation("drive", false, false, true), false)
+assert.strictEqual(Model.shouldFetchIpLocation("drive", true, true, true), false)
+assert.strictEqual(Model.shouldFetchIpLocation("drive", false, true, false), false)
+assert.strictEqual(Model.shouldFetchIpLocation("drive", false, true, true), true)
+assert.strictEqual(Model.shouldFetchIpLocation("walk", false, true, true), true)
 
 const from = { lat: 38.8977, lon: -77.0365 }
 const to = { lat: 38.8899, lon: -77.0091 }
@@ -153,6 +161,8 @@ assert.strictEqual(Model.moveSuggestion(0, -1, 3), 0)
 const curl = Model.curlCommand("https://example.com")
 assert.deepStrictEqual(curl.slice(0, 3), ["curl", "-fsS", "--max-time"])
 assert.strictEqual(curl[curl.length - 1], "https://example.com")
+assert.strictEqual(curl[5], Model.userAgent())
+assert.strictEqual(Model.curlCommand("https://ipwho.is/", Model.anonUserAgent())[5], Model.anonUserAgent())
 
 const text = Model.formatDirectionsText(route, from, to, "drive", false)
 assert.ok(text.indexOf("Driving directions") !== -1)
