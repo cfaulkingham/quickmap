@@ -10,6 +10,12 @@ var MODAL_TILE_COLS = 4
 var MODAL_TILE_ROWS = 3
 var MIN_ZOOM = 2
 var MAX_ZOOM = 18
+var HTTP_TIMEOUT_SEC = 8
+var MAX_SEARCH_BYTES = 256 * 1024
+var MAX_ROUTE_BYTES = 1024 * 1024
+var MAX_LOCATION_BYTES = 16 * 1024
+var MAX_TILE_BYTES = 256 * 1024
+var TILE_BASE_URL = "https://tile.openstreetmap.org"
 
 function userAgent() {
   return USER_AGENT
@@ -17,6 +23,30 @@ function userAgent() {
 
 function anonUserAgent() {
   return ANON_USER_AGENT
+}
+
+function maxSearchBytes() {
+  return MAX_SEARCH_BYTES
+}
+
+function maxRouteBytes() {
+  return MAX_ROUTE_BYTES
+}
+
+function maxLocationBytes() {
+  return MAX_LOCATION_BYTES
+}
+
+function maxTileBytes() {
+  return MAX_TILE_BYTES
+}
+
+function httpTimeoutSec() {
+  return HTTP_TIMEOUT_SEC
+}
+
+function oversizeText(raw, maxBytes) {
+  return String(raw == null ? "" : raw).length > maxBytes
 }
 
 function shouldFetchIpLocation(mode, hasLocation, weatherResolved, usingCurrentOrigin) {
@@ -80,6 +110,7 @@ function placeDescription(row) {
 }
 
 function parseSearchResults(raw) {
+  if (oversizeText(raw, MAX_SEARCH_BYTES)) return []
   try {
     var data = JSON.parse(String(raw || "[]"))
     if (!data || !data.length) return []
@@ -132,6 +163,7 @@ function parseLocationFile(raw) {
 }
 
 function parseIpLocation(raw) {
+  if (oversizeText(raw, MAX_LOCATION_BYTES)) return null
   try {
     var data = JSON.parse(String(raw || "{}"))
     if (!data || data.success === false) return null
@@ -207,6 +239,7 @@ function formatManeuver(step) {
 }
 
 function parseRoute(raw) {
+  if (oversizeText(raw, MAX_ROUTE_BYTES)) return null
   try {
     var data = JSON.parse(String(raw || "{}"))
     if (!data || data.code !== "Ok" || !data.routes || !data.routes[0]) return null
@@ -565,8 +598,80 @@ function tilePath(cacheDir, tile) {
   return String(cacheDir || "") + "/" + tile.z + "-" + tile.x + "-" + tile.y + ".png"
 }
 
-function tileUrl(tile) {
-  return "https://tile.openstreetmap.org/" + tile.z + "/" + tile.x + "/" + tile.y + ".png"
+function tileUrl(tile, baseUrl) {
+  var base = String(baseUrl || TILE_BASE_URL).replace(/\/+$/, "")
+  return base + "/" + tile.z + "/" + tile.x + "/" + tile.y + ".png"
+}
+
+// curl --max-filesize is ignored for chunked responses, so the helper
+// also caps the body while reading and only then writes stdout or cache.
+function httpFetchPy() {
+  return [
+    "import os, subprocess, sys",
+    "mode, url, dest, ua = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]",
+    "limit, timeout = int(sys.argv[5]), int(sys.argv[6])",
+    "if (mode != \"json\" and mode != \"tile\") or limit < 1 or timeout < 1:",
+    "    raise SystemExit(1)",
+    "cmd = [\"curl\", \"-fsS\", \"--max-time\", str(timeout), \"--max-filesize\", str(limit), \"-A\", ua, url]",
+    "try:",
+    "    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)",
+    "except OSError:",
+    "    raise SystemExit(1)",
+    "buf = bytearray()",
+    "over = False",
+    "while True:",
+    "    n = min(65536, limit + 1 - len(buf))",
+    "    if n <= 0:",
+    "        over = True",
+    "        break",
+    "    chunk = proc.stdout.read(n)",
+    "    if not chunk:",
+    "        break",
+    "    buf.extend(chunk)",
+    "    if len(buf) > limit:",
+    "        over = True",
+    "        break",
+    "if over:",
+    "    try:",
+    "        proc.stdout.close()",
+    "    except OSError:",
+    "        pass",
+    "    try:",
+    "        proc.kill()",
+    "    except OSError:",
+    "        pass",
+    "code = proc.wait()",
+    "if over or code != 0 or len(buf) > limit:",
+    "    raise SystemExit(1)",
+    "if mode == \"tile\":",
+    "    png = b\"\\x89PNG\\r\\n\\x1a\\n\"",
+    "    if len(buf) < 24 or buf[:8] != png or buf[12:16] != b\"IHDR\":",
+    "        raise SystemExit(1)",
+    "    w = int.from_bytes(buf[16:20], \"big\")",
+    "    h = int.from_bytes(buf[20:24], \"big\")",
+    "    if w != " + TILE_SIZE + " or h != " + TILE_SIZE + ":",
+    "        raise SystemExit(1)",
+    "    tmp = dest + \".part\"",
+    "    try:",
+    "        os.remove(tmp)",
+    "    except OSError:",
+    "        pass",
+    "    d = os.path.dirname(dest)",
+    "    if d:",
+    "        os.makedirs(d, exist_ok=True)",
+    "    try:",
+    "        with open(tmp, \"wb\") as out:",
+    "            out.write(buf)",
+    "        os.replace(tmp, dest)",
+    "    except OSError:",
+    "        try:",
+    "            os.remove(tmp)",
+    "        except OSError:",
+    "            pass",
+    "        raise SystemExit(1)",
+    "else:",
+    "    sys.stdout.buffer.write(buf)"
+  ].join("\n")
 }
 
 function wrapTileX(x, zoom) {
@@ -680,16 +785,20 @@ function prefetchTiles(view, maxTiles) {
   return all
 }
 
-function tileFetchScript(cacheDir, tiles, agent) {
+function tileFetchScript(cacheDir, tiles, agent, baseUrl, maxBytes) {
+  maxBytes = parseInt(maxBytes, 10)
+  if (!isFinite(maxBytes) || maxBytes < 1) maxBytes = MAX_TILE_BYTES
   var lines = [
     "mkdir -p " + shQuote(cacheDir),
     "ua=" + shQuote(agent || USER_AGENT),
+    "py=" + shQuote(httpFetchPy()),
     "missf=$(mktemp)",
     "n=0",
     "fetch() {",
     "  [ -s \"$1\" ] && return 0",
     "  echo 1 > \"$missf\"",
-    "  curl -fsS --max-time 8 -A \"$ua\" -o \"$1\" \"$2\" || rm -f \"$1\"",
+    "  python3 -c \"$py\" tile \"$2\" \"$1\" \"$ua\" " + maxBytes + " " + HTTP_TIMEOUT_SEC
+      + " || rm -f \"$1\" \"$1.part\"",
     "}",
     "slot() { n=$((n+1)); if [ \"$n\" -ge 2 ]; then wait; n=0; fi; }"
   ]
@@ -701,7 +810,7 @@ function tileFetchScript(cacheDir, tiles, agent) {
     var y = Number(t.y) | 0
     if (z < 0 || x < 0 || y < 0) continue
     var file = shQuote(cacheDir + "/" + z + "-" + x + "-" + y + ".png")
-    var url = shQuote("https://tile.openstreetmap.org/" + z + "/" + x + "/" + y + ".png")
+    var url = shQuote(tileUrl({ z: z, x: x, y: y }, baseUrl))
     lines.push("fetch " + file + " " + url + " & slot")
   }
   lines.push("wait")
@@ -710,8 +819,14 @@ function tileFetchScript(cacheDir, tiles, agent) {
   return lines.join("\n")
 }
 
-function curlCommand(url, agent) {
-  return ["curl", "-fsS", "--max-time", "8", "-A", agent || USER_AGENT, url]
+function curlCommand(url, agent, maxBytes) {
+  maxBytes = parseInt(maxBytes, 10)
+  if (!isFinite(maxBytes) || maxBytes < 1) maxBytes = MAX_SEARCH_BYTES
+  return [
+    "python3", "-c", httpFetchPy(),
+    "json", url, "-", agent || USER_AGENT,
+    String(maxBytes), String(HTTP_TIMEOUT_SEC)
+  ]
 }
 
 function markersFor(mode, place, origin, dest) {
@@ -739,6 +854,11 @@ if (typeof module !== "undefined") {
   module.exports = {
     userAgent: userAgent,
     anonUserAgent: anonUserAgent,
+    maxSearchBytes: maxSearchBytes,
+    maxRouteBytes: maxRouteBytes,
+    maxLocationBytes: maxLocationBytes,
+    maxTileBytes: maxTileBytes,
+    httpTimeoutSec: httpTimeoutSec,
     shouldFetchIpLocation: shouldFetchIpLocation,
     trim: trim,
     parseCoords: parseCoords,

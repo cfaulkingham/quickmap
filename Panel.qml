@@ -256,7 +256,7 @@ Panel {
     if (searchProc.running) return
     root.searchActive = root.searchPending
     root.searching = true
-    searchProc.command = Model.curlCommand(Model.searchUrl(root.searchActive, 5))
+    searchProc.command = Model.curlCommand(Model.searchUrl(root.searchActive, 5), Model.userAgent(), Model.maxSearchBytes())
     searchProc.running = true
   }
 
@@ -319,7 +319,7 @@ Panel {
     }
     root.routing = true
     root.status = ""
-    routeProc.command = Model.curlCommand(Model.routeUrl(root.mode, root.effectiveOrigin, root.toPlace))
+    routeProc.command = Model.curlCommand(Model.routeUrl(root.mode, root.effectiveOrigin, root.toPlace), Model.userAgent(), Model.maxRouteBytes())
     routeProc.running = true
   }
 
@@ -432,7 +432,7 @@ Panel {
     if (!Model.shouldFetchIpLocation(root.mode, !!root.currentLocation, root.weatherResolved, root.usingCurrentOrigin))
       return
     if (ipProc.running) return
-    ipProc.command = Model.curlCommand("https://ipwho.is/", Model.anonUserAgent())
+    ipProc.command = Model.curlCommand("https://ipwho.is/", Model.anonUserAgent(), Model.maxLocationBytes())
     ipProc.running = true
   }
 
