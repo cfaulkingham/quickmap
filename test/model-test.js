@@ -36,7 +36,7 @@ assert.ok(coords.name.indexOf("1.50000") !== -1)
 
 assert.deepStrictEqual(
   Model.parseLocationFile('{"name":"Austin","latitude":30.27,"longitude":-97.74}'),
-  { name: "Austin", description: "Weather location", lat: 30.27, lon: -97.74, type: "current" }
+  { name: "Austin", description: "Weather location", lat: 30.27, lon: -97.74, type: "weather" }
 )
 assert.strictEqual(Model.parseLocationFile("{}"), null)
 
@@ -57,12 +57,20 @@ assert.ok(Model.searchUrl("a b").indexOf("a%20b") !== -1)
 assert.strictEqual(Model.userAgent().indexOf("QuickMap/1.0"), 0)
 assert.ok(Model.userAgent().indexOf("@") !== -1)
 assert.ok(Model.anonUserAgent().indexOf("@") === -1)
-assert.strictEqual(Model.shouldFetchIpLocation("lookup", false, true, true), false)
-assert.strictEqual(Model.shouldFetchIpLocation("drive", false, false, true), false)
-assert.strictEqual(Model.shouldFetchIpLocation("drive", true, true, true), false)
-assert.strictEqual(Model.shouldFetchIpLocation("drive", false, true, false), false)
-assert.strictEqual(Model.shouldFetchIpLocation("drive", false, true, true), true)
-assert.strictEqual(Model.shouldFetchIpLocation("walk", false, true, true), true)
+assert.strictEqual(Model.shouldFetchIpLocation("lookup", false, true, true, true), false)
+assert.strictEqual(Model.shouldFetchIpLocation("drive", false, false, true, true), false)
+assert.strictEqual(Model.shouldFetchIpLocation("drive", true, true, true, true), false)
+assert.strictEqual(Model.shouldFetchIpLocation("drive", false, true, false, true), false)
+assert.strictEqual(Model.shouldFetchIpLocation("drive", false, true, true, false), false)
+assert.strictEqual(Model.shouldFetchIpLocation("drive", false, true, true, true), true)
+assert.strictEqual(Model.shouldFetchIpLocation("walk", false, true, true, true), true)
+assert.strictEqual(Model.plain("<img src=\"http://evil\"> & x", 80), "img src=\"http://evil\"  x")
+assert.deepStrictEqual(Model.parseSearchResults(JSON.stringify(new Array(Model.maxSearchResults() + 1).fill({
+  lat: "1", lon: "2", name: "A", display_name: "A"
+}))), [])
+assert.strictEqual(Model.parseSearchResults(JSON.stringify([{
+  lat: "1", lon: "2", name: "<b>Hi</b>", display_name: "<b>Hi</b>, Town"
+}]))[0].name.indexOf("<"), -1)
 
 const from = { lat: 38.8977, lon: -77.0365 }
 const to = { lat: 38.8899, lon: -77.0091 }
@@ -92,6 +100,16 @@ assert.strictEqual(route.steps[1].instruction, "Turn right onto 15th Street")
 assert.strictEqual(route.steps[2].instruction, "Arrive")
 assert.strictEqual(Model.parseRoute('{"code":"NoRoute"}'), null)
 assert.strictEqual(Model.parseRoute("x".repeat(Model.maxRouteBytes() + 1)), null)
+const tooManySteps = {
+  code: "Ok",
+  routes: [{
+    distance: 1,
+    duration: 1,
+    geometry: { coordinates: [[0, 0]] },
+    legs: [{ steps: new Array(Model.maxRouteSteps() + 1).fill({ name: "A", distance: 1, duration: 1, maneuver: { type: "continue" } }) }]
+  }]
+}
+assert.strictEqual(Model.parseRoute(JSON.stringify(tooManySteps)), null)
 
 assert.strictEqual(Model.formatDistance(250, false), "250 m")
 assert.strictEqual(Model.formatDistance(2500, false), "2.5 km")
@@ -131,17 +149,9 @@ assert.ok(Math.abs(centered.y - 50) < 1)
 const wide = Model.fitView([{ lat: 0, lon: 0 }, { lat: 1, lon: 1 }])
 assert.ok(wide.zoom < 15)
 
-const script = Model.tileFetchScript("/tmp/quickmap-tiles", view.tiles)
-assert.ok(script.indexOf("mkdir -p '/tmp/quickmap-tiles'") !== -1)
-assert.ok(script.indexOf("tile.openstreetmap.org/") !== -1)
-assert.ok(script.indexOf("--max-filesize") !== -1)
-assert.ok(script.indexOf("--max-time") !== -1)
-assert.ok(script.indexOf(String(Model.maxTileBytes())) !== -1)
-assert.ok(script.indexOf(String(Model.httpTimeoutSec())) !== -1)
-assert.ok(script.indexOf("-ge 2") !== -1)
-assert.ok(script.indexOf(".part") !== -1)
-assert.ok(script.indexOf("IHDR") !== -1)
-assert.ok(Model.tileFetchScript("/tmp/quickmap-tiles", [{ z: 2, x: 0, y: 0 }], Model.userAgent(), "http://127.0.0.1:9").indexOf("http://127.0.0.1:9/2/0/0.png") !== -1)
+assert.strictEqual(Model.tileFileName({ z: 2, x: 0, y: 0 }), "2-0-0.png")
+assert.strictEqual(Model.tileFileName({ z: 1, x: 0, y: 0 }), "")
+assert.ok(Model.tilesJson(view.tiles).indexOf("\"z\"") !== -1)
 
 const halo = Model.neighborTiles(view, 1)
 assert.ok(halo.length > view.tiles.length)
@@ -167,28 +177,25 @@ assert.strictEqual(Model.moveSuggestion(0, 1, 3), 1)
 assert.strictEqual(Model.moveSuggestion(2, 1, 3), 2)
 assert.strictEqual(Model.moveSuggestion(0, -1, 3), 0)
 
-const curl = Model.curlCommand("https://example.com")
-assert.strictEqual(curl[0], "python3")
-assert.strictEqual(curl[1], "-c")
-assert.ok(curl[2].indexOf("--max-time") !== -1)
-assert.ok(curl[2].indexOf("--max-filesize") !== -1)
-assert.ok(curl[2].indexOf("len(buf) > limit") !== -1)
-assert.strictEqual(curl[3], "json")
-assert.strictEqual(curl[4], "https://example.com")
-assert.strictEqual(curl[5], "-")
-assert.strictEqual(curl[6], Model.userAgent())
-assert.strictEqual(curl[7], String(Model.maxSearchBytes()))
-assert.strictEqual(curl[8], String(Model.httpTimeoutSec()))
-const ipCurl = Model.curlCommand("https://ipwho.is/", Model.anonUserAgent(), Model.maxLocationBytes())
-assert.strictEqual(ipCurl[6], Model.anonUserAgent())
-assert.strictEqual(ipCurl[7], String(Model.maxLocationBytes()))
-const routeCurl = Model.curlCommand("https://router.example/route", Model.userAgent(), Model.maxRouteBytes())
-assert.strictEqual(routeCurl[7], String(Model.maxRouteBytes()))
+const helper = Model.helperCommand("/plugins/quickmap", "search")
+assert.deepStrictEqual(helper.slice(0, 4), ["/usr/bin/python3", "-I", "-S", "/plugins/quickmap/bin/quickmap-helper.py"])
+assert.strictEqual(helper[4], "search")
+assert.strictEqual(Model.helperCommand("/plugins/../etc", "search").length, 0)
+const routeCmd = Model.helperCommand("/plugins/quickmap", "route", ["drive", "1", "2", "3", "4"])
+assert.strictEqual(routeCmd[5], "--")
+assert.strictEqual(routeCmd[6], "drive")
+assert.ok(Model.isSafeOsmUrl("https://www.openstreetmap.org/?mlat=1&mlon=2"))
+assert.ok(!Model.isSafeOsmUrl("https://evil.example/"))
+assert.ok(!Model.isSafeOsmUrl("https://user:pass@www.openstreetmap.org/"))
+assert.ok(!Model.isSafeOsmUrl("https://www.openstreetmap.org.evil.example/"))
+assert.strictEqual(Model.openUrl({ lat: 1, lon: 2 }, null, null, "lookup").indexOf("https://www.openstreetmap.org/"), 0)
 assert.ok(Model.maxSearchBytes() >= 16 * 1024)
 assert.ok(Model.maxRouteBytes() >= Model.maxSearchBytes())
 assert.ok(Model.maxLocationBytes() >= 1024)
 assert.ok(Model.maxTileBytes() >= 32 * 1024)
 assert.strictEqual(Model.httpTimeoutSec(), 8)
+assert.ok(Model.maxQueryChars() >= 32)
+assert.ok(Model.maxSearchResults() <= 8)
 
 const text = Model.formatDirectionsText(route, from, to, "drive", false)
 assert.ok(text.indexOf("Driving directions") !== -1)
@@ -198,12 +205,6 @@ assert.strictEqual(Model.escapeHtml('A <B> & "C"'), "A &lt;B&gt; &amp; &quot;C&q
 const html = Model.formatDirectionsHtml(route, from, to, "walk", false)
 assert.ok(html.indexOf("<ol>") !== -1)
 assert.ok(html.indexOf("Walking") !== -1)
-const printCmd = Model.printCommand("/tmp/a.txt", "hi")
-assert.strictEqual(printCmd[0], "python3")
-assert.strictEqual(printCmd[3], "/tmp/a.txt")
-assert.ok(printCmd[2].indexOf("xdg-open") === -1)
-assert.ok(printCmd[2].indexOf("NO_PRINTER") !== -1)
-
 const off = Model.offlineTiles(view, 2, 2, 200)
 assert.ok(off.length > view.tiles.length)
 assert.ok(off.length <= 200)
@@ -219,11 +220,11 @@ const panned = Model.panView(view, 50, 0, 200, 100)
 const afterPan = Model.projectOnView(0, 0, panned, 200, 100)
 assert.ok(afterPan.x > 100)
 
-const httpSize = require("child_process").spawnSync(
-  process.execPath,
-  [require("path").join(__dirname, "http-size-test.js")],
+const helperTest = require("child_process").spawnSync(
+  "/usr/bin/python3",
+  ["-I", "-S", require("path").join(__dirname, "test_helper.py")],
   { stdio: "inherit" }
 )
-assert.strictEqual(httpSize.status, 0)
+assert.strictEqual(helperTest.status, 0)
 
 console.log("ok")

@@ -202,6 +202,7 @@ Item {
               border.color: Qt.rgba(1, 1, 1, 0.35)
               border.width: 1
               Text {
+                textFormat: Text.PlainText
                 anchors.centerIn: parent
                 text: "+"
                 color: "#ffffff"
@@ -223,6 +224,7 @@ Item {
               border.color: Qt.rgba(1, 1, 1, 0.35)
               border.width: 1
               Text {
+                textFormat: Text.PlainText
                 anchors.centerIn: parent
                 text: "−"
                 color: "#ffffff"
@@ -320,6 +322,7 @@ Item {
                 spacing: Style.space(8)
 
                 Text {
+                  textFormat: Text.PlainText
                   width: Style.space(22)
                   text: (index + 1) + "."
                   color: Qt.darker(root.foreground, 1.4)

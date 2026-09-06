@@ -98,9 +98,14 @@ Item {
           : 0
         width: root.cols > 0 ? root.width / root.cols : 0
         height: root.rows > 0 ? root.height / root.rows : 0
-        source: root.tilesReady && root.cacheDir !== ""
-          ? "file://" + root.cacheDir + "/" + modelData.z + "-" + modelData.x + "-" + modelData.y + ".png"
-          : ""
+        source: {
+          var name = Model.tileFileName(modelData)
+          return root.tilesReady && root.cacheDir !== "" && name !== ""
+            ? "file://" + root.cacheDir + "/" + name
+            : ""
+        }
+        sourceSize.width: Model.tileSize()
+        sourceSize.height: Model.tileSize()
         fillMode: Image.Stretch
         asynchronous: true
         cache: true

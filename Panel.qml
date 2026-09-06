@@ -20,7 +20,9 @@ Panel {
   property var fromPlace: null
   property var toPlace: null
   property var route: null
-  property var currentLocation: null
+  property var weatherLocation: null
+  property var ipLocation: null
+  property bool ipOptIn: false
   property var mapView: null
   property var mapMarkers: []
   property var mapRoute: []
@@ -43,24 +45,39 @@ Panel {
   property bool offline: false
   property bool routeQueued: false
   property bool weatherResolved: false
+  property int prefetchFails: 0
 
   readonly property var barIdentity: hostWidget || root
   readonly property color contentForeground: bar ? bar.barForeground : Color.foreground
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool imperial: Model.useImperial(Qt.locale().name)
-  readonly property string cacheDir: {
-    var xdg = Quickshell.env("XDG_CACHE_HOME")
-    return (xdg ? xdg : Quickshell.env("HOME") + "/.cache") + "/quickmap/tiles"
+  readonly property string pluginDir: {
+    var raw = String(Qt.resolvedUrl("."))
+      .replace(/^file:\/\//, "")
+      .replace(/\/$/, "")
+    try { return decodeURIComponent(raw) } catch (e) { return raw }
   }
+  readonly property string cacheDir: Model.cacheDirPath(
+    Quickshell.env("HOME"),
+    Quickshell.env("XDG_CACHE_HOME")
+  )
+  readonly property var helperEnv: ({
+    "HOME": Quickshell.env("HOME") || "",
+    "USER": Quickshell.env("USER") || "",
+    "XDG_CACHE_HOME": Quickshell.env("XDG_CACHE_HOME") || "",
+    "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || "",
+    "PATH": "/usr/bin:/bin",
+    "LANG": Quickshell.env("LANG") || "C.UTF-8",
+    "LC_ALL": "C.UTF-8"
+  })
+  readonly property var currentLocation: root.weatherLocation
+    ? root.weatherLocation
+    : (root.ipOptIn ? root.ipLocation : null)
   readonly property bool usingCurrentOrigin: mode !== "lookup" && Model.trim(fromField.text) === ""
   readonly property var effectiveOrigin: usingCurrentOrigin ? currentLocation : fromPlace
   readonly property bool showSuggestions: suggestions.length > 0
   readonly property bool showMap: !showSuggestions && mapView && mapView.tiles && mapView.tiles.length > 0
   readonly property bool fieldFocused: queryField.activeFocus || fromField.activeFocus || toField.activeFocus
-  readonly property string cacheRoot: {
-    var xdg = Quickshell.env("XDG_CACHE_HOME")
-    return (xdg ? xdg : Quickshell.env("HOME") + "/.cache") + "/quickmap"
-  }
   readonly property var routeSteps: root.route && root.route.steps ? root.route.steps : []
   readonly property string modalTitle: Model.directionsTitle(root.effectiveOrigin, root.toPlace, root.place, root.mode)
   readonly property string modalSummary: root.route
@@ -91,12 +108,53 @@ Panel {
     root.controller.show()
     root.offline = false
     if (root.status === root.offlineSearchMessage) root.status = ""
+    root.reloadWeather()
     root.maybeFetchIpLocation()
     Qt.callLater(function() {
       if (!root.opened) return
       setCenterHoverRevealSuppressed(true)
       root.focusPrimaryField()
     })
+  }
+
+  function helperCmd(verb, args) {
+    return Model.helperCommand(root.pluginDir, verb, args)
+  }
+
+  function stopProc(proc, killTimer, escalate) {
+    if (!proc) return
+    if (proc.running) {
+      proc.signal(15)
+      proc.running = false
+      if (escalate && killTimer) killTimer.restart()
+      else if (killTimer) killTimer.stop()
+    } else if (killTimer && !escalate) {
+      killTimer.stop()
+    }
+  }
+
+  function startProc(proc, killTimer) {
+    if (killTimer) killTimer.stop()
+    proc.running = true
+  }
+
+  function stopAllHelpers() {
+    root.stopProc(searchProc, searchKill, true)
+    root.stopProc(routeProc, routeKill, true)
+    root.stopProc(tileProc, tileKill, true)
+    root.stopProc(modalTileProc, modalTileKill, true)
+    root.stopProc(prefetchProc, prefetchKill, true)
+    root.stopProc(offlineProc, offlineKill, true)
+    root.stopProc(printProc, printKill, true)
+    root.stopProc(ipProc, ipKill, true)
+    root.stopProc(weatherProc, weatherKill, true)
+  }
+
+  function armHelper(proc, verb, args) {
+    proc.buf = ""
+    proc.overflow = false
+    proc.command = root.helperCmd(verb, args)
+    return proc.command.length > 0
   }
 
   function markOffline() {
@@ -256,8 +314,12 @@ Panel {
     if (searchProc.running) return
     root.searchActive = root.searchPending
     root.searching = true
-    searchProc.command = Model.curlCommand(Model.searchUrl(root.searchActive, 5), Model.userAgent(), Model.maxSearchBytes())
-    searchProc.running = true
+    searchProc.payload = root.searchActive
+    if (!root.armHelper(searchProc, "search")) {
+      root.searching = false
+      return
+    }
+    root.startProc(searchProc, searchKill)
   }
 
   function submitField(name) {
@@ -319,8 +381,17 @@ Panel {
     }
     root.routing = true
     root.status = ""
-    routeProc.command = Model.curlCommand(Model.routeUrl(root.mode, root.effectiveOrigin, root.toPlace), Model.userAgent(), Model.maxRouteBytes())
-    routeProc.running = true
+    if (!root.armHelper(routeProc, "route", [
+      root.mode,
+      String(root.effectiveOrigin.lat),
+      String(root.effectiveOrigin.lon),
+      String(root.toPlace.lat),
+      String(root.toPlace.lon)
+    ])) {
+      root.routing = false
+      return
+    }
+    root.startProc(routeProc, routeKill)
   }
 
   function refreshMap() {
@@ -340,19 +411,22 @@ Panel {
   }
 
   function fetchTiles() {
-    if (tileProc.running) tileProc.running = false
-    tileProc.command = ["bash", "-lc", Model.tileFetchScript(root.cacheDir, root.mapView.tiles, Model.userAgent())]
-    tileProc.running = true
+    root.stopProc(tileProc, tileKill)
+    tileProc.payload = Model.tilesJson(root.mapView.tiles)
+    if (!root.armHelper(tileProc, "tiles")) return
+    root.startProc(tileProc, tileKill)
   }
 
   function prefetchAround(view) {
     if (!view || !view.tiles) return
+    if (root.prefetchFails >= 3) return
     if (prefetchProc.running) {
       root.prefetchQueuedView = view
       return
     }
-    prefetchProc.command = ["bash", "-lc", Model.tileFetchScript(root.cacheDir, Model.prefetchTiles(view), Model.userAgent())]
-    prefetchProc.running = true
+    prefetchProc.payload = Model.tilesJson(Model.prefetchTiles(view))
+    if (!root.armHelper(prefetchProc, "tiles")) return
+    root.startProc(prefetchProc, prefetchKill)
   }
 
   function mapPoints() {
@@ -392,18 +466,24 @@ Panel {
       root.modalFetchQueued = true
       return
     }
-    modalTileProc.command = ["bash", "-lc", Model.tileFetchScript(root.cacheDir, root.modalView.tiles, Model.userAgent())]
-    modalTileProc.running = true
+    modalTileProc.payload = Model.tilesJson(root.modalView.tiles)
+    if (!root.armHelper(modalTileProc, "tiles")) return
+    root.startProc(modalTileProc, modalTileKill)
   }
 
   function printDirections() {
     if (!root.route) return
-    var text = Model.formatDirectionsText(root.route, root.effectiveOrigin, root.toPlace, root.mode, root.imperial)
     root.printOutput = ""
     root.modalStatus = "Sending to printer…"
-    if (printProc.running) printProc.running = false
-    printProc.command = Model.printCommand(root.cacheRoot + "/directions.txt", text)
-    printProc.running = true
+    root.stopProc(printProc, printKill)
+    printProc.payload = Model.formatDirectionsText(
+      root.route, root.effectiveOrigin, root.toPlace, root.mode, root.imperial
+    )
+    if (!root.armHelper(printProc, "print")) {
+      root.modalStatus = "Print failed"
+      return
+    }
+    root.startProc(printProc, printKill)
   }
 
   function cacheView() {
@@ -424,21 +504,42 @@ Panel {
     root.cachingOffline = true
     root.modalStatus = "Saving " + tiles.length + " tiles for offline use…"
     root.status = root.modalStatus
-    offlineProc.command = ["bash", "-lc", Model.tileFetchScript(root.cacheDir, tiles, Model.userAgent())]
-    offlineProc.running = true
+    offlineProc.payload = Model.tilesJson(tiles)
+    if (!root.armHelper(offlineProc, "tiles")) {
+      root.cachingOffline = false
+      return
+    }
+    root.startProc(offlineProc, offlineKill)
   }
 
   function maybeFetchIpLocation() {
-    if (!Model.shouldFetchIpLocation(root.mode, !!root.currentLocation, root.weatherResolved, root.usingCurrentOrigin))
+    if (!Model.shouldFetchIpLocation(root.mode, !!root.weatherLocation, root.weatherResolved, root.usingCurrentOrigin, root.ipOptIn))
       return
+    if (root.ipLocation) return
     if (ipProc.running) return
-    ipProc.command = Model.curlCommand("https://ipwho.is/", Model.anonUserAgent(), Model.maxLocationBytes())
-    ipProc.running = true
+    if (!root.armHelper(ipProc, "ip")) return
+    root.startProc(ipProc, ipKill)
+  }
+
+  function reloadWeather() {
+    if (weatherProc.running) return
+    if (!root.armHelper(weatherProc, "weather")) {
+      root.weatherResolved = true
+      root.maybeFetchIpLocation()
+      return
+    }
+    root.startProc(weatherProc, weatherKill)
   }
 
   function openInOsm() {
     var url = Model.openUrl(root.place, root.effectiveOrigin, root.toPlace, root.mode)
-    if (url) Quickshell.execDetached(["xdg-open", url])
+    if (url) Quickshell.execDetached(["/usr/bin/xdg-open", "--", url])
+  }
+
+  function setIpOptIn(on) {
+    root.ipOptIn = !!on
+    if (!root.ipOptIn) return
+    root.maybeFetchIpLocation()
   }
 
   function handleFieldKeys(event, name) {
@@ -461,127 +562,236 @@ Panel {
   FileView {
     path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/weather.json"
     watchChanges: true
+    preload: false
+    blockAllReads: true
     printErrors: false
-    onLoaded: {
-      var loc = Model.parseLocationFile(text())
-      if (loc) root.currentLocation = loc
-      root.weatherResolved = true
-      root.maybeFetchIpLocation()
-    }
-    onLoadFailed: {
-      root.weatherResolved = true
-      root.maybeFetchIpLocation()
-    }
+    onFileChanged: root.reloadWeather()
   }
 
   Process {
     id: searchProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.searching = false
-        if (root.searchPending !== root.searchActive) {
-          Qt.callLater(root.startSearch)
+    property string buf: ""
+    property bool overflow: false
+    property string payload: ""
+    stdinEnabled: true
+    clearEnvironment: true
+    environment: root.helperEnv
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function() {}
+    }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (searchProc.overflow) return
+        var piece = String(chunk || "")
+        if (searchProc.buf.length + piece.length > Model.maxSearchBytes()) {
+          searchProc.overflow = true
+          searchProc.buf = ""
+          root.stopProc(searchProc, searchKill, true)
           return
         }
-        var raw = String(text || "").trim()
-        if (!raw) return
-        root.markOnline()
-        root.suggestions = Model.parseSearchResults(raw)
-        root.suggestionIndex = 0
-        if (root.suggestions.length === 0 && Model.trim(root.fieldText(root.searchField)).length >= 2)
-          root.status = "No results"
+        searchProc.buf += piece
       }
     }
+    onStarted: if (searchProc.payload) searchProc.write(searchProc.payload)
     onExited: function(code) {
+      searchKill.stop()
       root.searching = false
-      if (code === 0) return
+      if (searchProc.overflow) return
       if (root.searchPending !== root.searchActive) {
         Qt.callLater(root.startSearch)
         return
       }
-      root.markOffline()
+      if (code !== 0) {
+        root.markOffline()
+        return
+      }
+      var raw = String(searchProc.buf || "").trim()
+      if (!raw) return
+      root.markOnline()
+      root.suggestions = Model.parseSearchResults(raw)
+      root.suggestionIndex = 0
+      if (root.suggestions.length === 0 && Model.trim(root.fieldText(root.searchField)).length >= 2)
+        root.status = "No results"
     }
   }
 
   Process {
     id: routeProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.routing = false
-        var raw = String(text || "").trim()
-        if (!raw) return
-        root.markOnline()
-        var parsed = Model.parseRoute(raw)
-        root.route = parsed
-        if (!parsed) root.status = "No route found"
-        root.refreshMap()
-        if (root.routeQueued) {
-          root.routeQueued = false
-          Qt.callLater(root.maybeRoute)
+    property string buf: ""
+    property bool overflow: false
+    clearEnvironment: true
+    environment: root.helperEnv
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function() {}
+    }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (routeProc.overflow) return
+        var piece = String(chunk || "")
+        if (routeProc.buf.length + piece.length > Model.maxRouteBytes()) {
+          routeProc.overflow = true
+          routeProc.buf = ""
+          root.stopProc(routeProc, routeKill, true)
+          return
         }
+        routeProc.buf += piece
       }
     }
     onExited: function(code) {
+      routeKill.stop()
       root.routing = false
-      if (code !== 0) root.markOffline()
-      else if (root.routeQueued) {
+      if (root.routeQueued) {
         root.routeQueued = false
         Qt.callLater(root.maybeRoute)
       }
+      if (routeProc.overflow) return
+      if (code !== 0) {
+        root.markOffline()
+        return
+      }
+      var raw = String(routeProc.buf || "").trim()
+      if (!raw) return
+      root.markOnline()
+      var parsed = Model.parseRoute(raw)
+      root.route = parsed
+      if (!parsed) root.status = "No route found"
+      root.refreshMap()
     }
   }
 
   Process {
     id: tileProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var miss = String(text || "").indexOf("1") !== -1
+    property string buf: ""
+    property bool overflow: false
+    property string payload: ""
+    stdinEnabled: true
+    clearEnvironment: true
+    environment: root.helperEnv
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function() {}
+    }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (tileProc.overflow) return
+        var piece = String(chunk || "")
+        if (tileProc.buf.length + piece.length > 32) {
+          tileProc.overflow = true
+          tileProc.buf = ""
+          root.stopProc(tileProc, tileKill, true)
+          return
+        }
+        tileProc.buf += piece
+      }
+    }
+    onStarted: if (tileProc.payload) tileProc.write(tileProc.payload)
+    onExited: function(code) {
+      tileKill.stop()
+      if (code === 0 && !tileProc.overflow) {
+        var miss = tileProc.buf.indexOf("1") !== -1
         if (miss) {
           root.tilesReady = false
           Qt.callLater(function() { root.tilesReady = true })
         } else {
           root.tilesReady = true
         }
+        root.prefetchFails = 0
         root.prefetchAround(root.mapView)
-        if (root.offlineQueued) {
-          root.offlineQueued = false
-          Qt.callLater(root.cacheOffline)
-        }
+      }
+      if (root.offlineQueued) {
+        root.offlineQueued = false
+        Qt.callLater(root.cacheOffline)
       }
     }
   }
 
   Process {
     id: modalTileProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var miss = String(text || "").indexOf("1") !== -1
+    property string buf: ""
+    property bool overflow: false
+    property string payload: ""
+    stdinEnabled: true
+    clearEnvironment: true
+    environment: root.helperEnv
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function() {}
+    }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (modalTileProc.overflow) return
+        var piece = String(chunk || "")
+        if (modalTileProc.buf.length + piece.length > 32) {
+          modalTileProc.overflow = true
+          modalTileProc.buf = ""
+          root.stopProc(modalTileProc, modalTileKill, true)
+          return
+        }
+        modalTileProc.buf += piece
+      }
+    }
+    onStarted: if (modalTileProc.payload) modalTileProc.write(modalTileProc.payload)
+    onExited: function(code) {
+      modalTileKill.stop()
+      if (code === 0 && !modalTileProc.overflow) {
+        var miss = modalTileProc.buf.indexOf("1") !== -1
         if (miss) {
           root.modalTilesReady = false
           Qt.callLater(function() { root.modalTilesReady = true })
         } else {
           root.modalTilesReady = true
         }
-        if (root.modalFetchQueued) {
-          root.modalFetchQueued = false
-          Qt.callLater(root.fetchModalTiles)
-        } else if (root.offlineQueued) {
-          root.offlineQueued = false
-          Qt.callLater(root.cacheOffline)
-        } else {
-          root.prefetchAround(root.modalView)
-        }
+        root.prefetchFails = 0
+      }
+      if (root.modalFetchQueued) {
+        root.modalFetchQueued = false
+        Qt.callLater(root.fetchModalTiles)
+      } else if (root.offlineQueued) {
+        root.offlineQueued = false
+        Qt.callLater(root.cacheOffline)
+      } else if (code === 0) {
+        root.prefetchAround(root.modalView)
       }
     }
   }
 
   Process {
     id: prefetchProc
-    onExited: {
+    property string buf: ""
+    property bool overflow: false
+    property string payload: ""
+    stdinEnabled: true
+    clearEnvironment: true
+    environment: root.helperEnv
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function() {}
+    }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (prefetchProc.overflow) return
+        var piece = String(chunk || "")
+        if (prefetchProc.buf.length + piece.length > 32) {
+          prefetchProc.overflow = true
+          prefetchProc.buf = ""
+          root.stopProc(prefetchProc, prefetchKill, true)
+          return
+        }
+        prefetchProc.buf += piece
+      }
+    }
+    onStarted: if (prefetchProc.payload) prefetchProc.write(prefetchProc.payload)
+    onExited: function(code) {
+      prefetchKill.stop()
+      if (code !== 0 || prefetchProc.overflow) root.prefetchFails += 1
+      else root.prefetchFails = 0
       if (root.offlineQueued) {
         root.offlineQueued = false
         Qt.callLater(root.cacheOffline)
@@ -596,39 +806,166 @@ Panel {
 
   Process {
     id: offlineProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.cachingOffline = false
-        var miss = String(text || "").indexOf("1") !== -1
-        var msg = miss ? "Offline cache saved" : "Already cached for offline use"
-        root.modalStatus = msg
-        root.status = msg
+    property string buf: ""
+    property bool overflow: false
+    property string payload: ""
+    stdinEnabled: true
+    clearEnvironment: true
+    environment: root.helperEnv
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function() {}
+    }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (offlineProc.overflow) return
+        var piece = String(chunk || "")
+        if (offlineProc.buf.length + piece.length > 32) {
+          offlineProc.overflow = true
+          offlineProc.buf = ""
+          root.stopProc(offlineProc, offlineKill, true)
+          return
+        }
+        offlineProc.buf += piece
       }
     }
+    onStarted: if (offlineProc.payload) offlineProc.write(offlineProc.payload)
     onExited: function(code) {
-      if (code === 0) return
+      offlineKill.stop()
       root.cachingOffline = false
-      root.modalStatus = "Offline cache failed"
-      root.status = root.modalStatus
+      if (code !== 0 || offlineProc.overflow) {
+        root.modalStatus = "Offline cache failed"
+        root.status = root.modalStatus
+        return
+      }
+      var miss = offlineProc.buf.indexOf("1") !== -1
+      var msg = miss ? "Offline cache saved" : "Already cached for offline use"
+      root.modalStatus = msg
+      root.status = msg
     }
   }
 
   Process {
     id: printProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: { root.printOutput = String(text || "") }
+    property string buf: ""
+    property bool overflow: false
+    property string payload: ""
+    stdinEnabled: true
+    clearEnvironment: true
+    environment: root.helperEnv
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function() {}
     }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (printProc.overflow) return
+        var piece = String(chunk || "")
+        if (printProc.buf.length + piece.length > 4096) {
+          printProc.overflow = true
+          printProc.buf = ""
+          root.stopProc(printProc, printKill, true)
+          return
+        }
+        printProc.buf += piece
+      }
+    }
+    onStarted: if (printProc.payload) printProc.write(printProc.payload)
     onExited: function(code) {
-      var out = String(root.printOutput || "")
+      printKill.stop()
+      var out = String(printProc.buf || "")
       var msg = "Print failed"
-      if (code === 0) msg = "Sent to printer"
+      if (code === 0 && !printProc.overflow) msg = "Sent to printer"
       else if (out.indexOf("NO_PRINTER") !== -1) msg = "No printer configured"
+      root.printOutput = out
       root.status = msg
       root.modalStatus = msg
     }
   }
+
+  Process {
+    id: ipProc
+    property string buf: ""
+    property bool overflow: false
+    clearEnvironment: true
+    environment: root.helperEnv
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function() {}
+    }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (ipProc.overflow) return
+        var piece = String(chunk || "")
+        if (ipProc.buf.length + piece.length > Model.maxLocationBytes()) {
+          ipProc.overflow = true
+          ipProc.buf = ""
+          root.stopProc(ipProc, ipKill, true)
+          return
+        }
+        ipProc.buf += piece
+      }
+    }
+    onExited: function(code) {
+      ipKill.stop()
+      if (code !== 0 || ipProc.overflow || root.weatherLocation) return
+      var loc = Model.parseIpLocation(ipProc.buf)
+      if (!loc) return
+      root.ipLocation = loc
+      if (root.mode !== "lookup") {
+        root.maybeRoute()
+        root.refreshMap()
+      }
+    }
+  }
+
+  Process {
+    id: weatherProc
+    property string buf: ""
+    property bool overflow: false
+    clearEnvironment: true
+    environment: root.helperEnv
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function() {}
+    }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (weatherProc.overflow) return
+        var piece = String(chunk || "")
+        if (weatherProc.buf.length + piece.length > Model.maxLocationBytes()) {
+          weatherProc.overflow = true
+          weatherProc.buf = ""
+          root.stopProc(weatherProc, weatherKill, true)
+          return
+        }
+        weatherProc.buf += piece
+      }
+    }
+    onExited: function(code) {
+      weatherKill.stop()
+      root.weatherResolved = true
+      if (code === 0 && !weatherProc.overflow) {
+        var loc = Model.parseLocationFile(weatherProc.buf)
+        root.weatherLocation = loc
+      }
+      root.maybeFetchIpLocation()
+    }
+  }
+
+  Timer { id: searchKill; interval: 2000; onTriggered: searchProc.signal(9) }
+  Timer { id: routeKill; interval: 2000; onTriggered: routeProc.signal(9) }
+  Timer { id: tileKill; interval: 2000; onTriggered: tileProc.signal(9) }
+  Timer { id: modalTileKill; interval: 2000; onTriggered: modalTileProc.signal(9) }
+  Timer { id: prefetchKill; interval: 2000; onTriggered: prefetchProc.signal(9) }
+  Timer { id: offlineKill; interval: 2000; onTriggered: offlineProc.signal(9) }
+  Timer { id: printKill; interval: 2000; onTriggered: printProc.signal(9) }
+  Timer { id: ipKill; interval: 2000; onTriggered: ipProc.signal(9) }
+  Timer { id: weatherKill; interval: 2000; onTriggered: weatherProc.signal(9) }
 
   Timer {
     id: modalTileDebounce
@@ -636,29 +973,14 @@ Panel {
     onTriggered: root.fetchModalTiles()
   }
 
-  Process {
-    id: ipProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (root.currentLocation) return
-        var loc = Model.parseIpLocation(text)
-        if (loc) {
-          root.currentLocation = loc
-          if (root.mode !== "lookup") {
-            root.maybeRoute()
-            root.refreshMap()
-          }
-        }
-      }
-    }
-  }
-
   Timer {
     id: searchDebounce
     interval: 400
     onTriggered: root.startSearch()
   }
+
+  Component.onCompleted: root.reloadWeather()
+  Component.onDestruction: root.stopAllHelpers()
 
   KeyboardPanel {
     id: panel
@@ -705,6 +1027,7 @@ Panel {
           width: parent.width
           visible: root.mode === "lookup"
           enabled: !root.offline
+          maximumLength: Model.maxQueryChars()
           placeholderText: root.offline ? root.offlineSearchMessage : "Search an address"
           foreground: root.contentForeground
           font.family: root.contentFontFamily
@@ -721,10 +1044,11 @@ Panel {
             id: fromField
             width: parent.width
             enabled: !root.offline
+            maximumLength: Model.maxQueryChars()
             placeholderText: root.offline
               ? root.offlineSearchMessage
               : (root.currentLocation
-                ? "From · " + root.currentLocation.name
+                ? "From · " + Model.plain(root.currentLocation.name, Model.maxQueryChars())
                 : "From · current location")
             foreground: root.contentForeground
             font.family: root.contentFontFamily
@@ -736,11 +1060,25 @@ Panel {
             id: toField
             width: parent.width
             enabled: !root.offline
+            maximumLength: Model.maxQueryChars()
             placeholderText: root.offline ? root.offlineSearchMessage : "To"
             foreground: root.contentForeground
             font.family: root.contentFontFamily
             onTextChanged: if (!root.applyingText && root.mode !== "lookup") root.onDestinationTextChanged(text)
             Keys.onPressed: function(event) { root.handleFieldKeys(event, "to") }
+          }
+
+          Toggle {
+            width: parent.width
+            visible: root.mode !== "lookup" && !root.weatherLocation
+            checked: root.ipOptIn
+            label: "Estimate start from IP"
+            description: "Sends a request to ipwho.is for a city-level location. Off until you turn it on."
+            foreground: root.contentForeground
+            fontFamily: root.contentFontFamily
+            titleSize: Style.font.bodySmall
+            descriptionSize: Style.font.caption
+            onClicked: root.setIpOptIn(!root.ipOptIn)
           }
         }
 
@@ -848,6 +1186,7 @@ Panel {
 
             Text {
               id: expandLabel
+              textFormat: Text.PlainText
               anchors.centerIn: parent
               text: "Expand"
               color: "#ffffff"
@@ -925,6 +1264,7 @@ Panel {
           height: osmButton.implicitHeight
 
           Text {
+            textFormat: Text.PlainText
             text: "© OpenStreetMap"
             color: Qt.darker(root.contentForeground, 1.6)
             font.family: root.contentFontFamily

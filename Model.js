@@ -11,11 +11,21 @@ var MODAL_TILE_ROWS = 3
 var MIN_ZOOM = 2
 var MAX_ZOOM = 18
 var HTTP_TIMEOUT_SEC = 8
-var MAX_SEARCH_BYTES = 256 * 1024
-var MAX_ROUTE_BYTES = 1024 * 1024
+var MAX_SEARCH_BYTES = 64 * 1024
+var MAX_ROUTE_BYTES = 256 * 1024
 var MAX_LOCATION_BYTES = 16 * 1024
 var MAX_TILE_BYTES = 256 * 1024
+var MAX_SEARCH_RESULTS = 8
+var MAX_ROUTE_STEPS = 200
+var MAX_ROUTE_COORDS = 2000
+var MAX_NAME_CHARS = 200
+var MAX_DESCRIPTION_CHARS = 300
+var MAX_INSTRUCTION_CHARS = 200
+var MAX_QUERY_CHARS = 200
+var MAX_HELPER_STDOUT = MAX_ROUTE_BYTES
 var TILE_BASE_URL = "https://tile.openstreetmap.org"
+var OSM_OPEN_PREFIX = "https://www.openstreetmap.org/"
+var HELPER_NAME = "quickmap-helper.py"
 
 function userAgent() {
   return USER_AGENT
@@ -41,25 +51,51 @@ function maxTileBytes() {
   return MAX_TILE_BYTES
 }
 
+function maxQueryChars() {
+  return MAX_QUERY_CHARS
+}
+
+function maxHelperStdout() {
+  return MAX_HELPER_STDOUT
+}
+
+function maxSearchResults() {
+  return MAX_SEARCH_RESULTS
+}
+
+function maxRouteSteps() {
+  return MAX_ROUTE_STEPS
+}
+
 function httpTimeoutSec() {
   return HTTP_TIMEOUT_SEC
+}
+
+function tileSize() {
+  return TILE_SIZE
 }
 
 function oversizeText(raw, maxBytes) {
   return String(raw == null ? "" : raw).length > maxBytes
 }
 
-function shouldFetchIpLocation(mode, hasLocation, weatherResolved, usingCurrentOrigin) {
-  if (hasLocation || !weatherResolved || !usingCurrentOrigin) return false
+function plain(text, maxLen) {
+  var limit = parseInt(maxLen, 10)
+  if (!isFinite(limit) || limit < 1) limit = MAX_NAME_CHARS
+  var s = String(text == null ? "" : text)
+  s = s.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, "")
+  s = s.replace(/&/g, "").replace(/</g, "").replace(/>/g, "")
+  if (s.length > limit) s = s.slice(0, limit)
+  return s
+}
+
+function shouldFetchIpLocation(mode, hasLocation, weatherResolved, usingCurrentOrigin, ipOptIn) {
+  if (!ipOptIn || hasLocation || !weatherResolved || !usingCurrentOrigin) return false
   return mode === "drive" || mode === "walk"
 }
 
 function trim(text) {
   return String(text == null ? "" : text).replace(/^\s+|\s+$/g, "")
-}
-
-function shQuote(value) {
-  return "'" + String(value).replace(/'/g, "'\\''") + "'"
 }
 
 function clamp(n, lo, hi) {
@@ -76,7 +112,6 @@ function parseCoords(text) {
   var a = Number(m[1])
   var b = Number(m[2])
   if (!isFinite(a) || !isFinite(b)) return null
-  // OSM order is lat, lon. Swap only when the first number cannot be a latitude.
   if (Math.abs(a) > 90 && Math.abs(a) <= 180 && Math.abs(b) <= 90)
     return { lat: b, lon: a }
   if (Math.abs(a) <= 90 && Math.abs(b) <= 180) return { lat: a, lon: b }
@@ -84,18 +119,18 @@ function parseCoords(text) {
 }
 
 function searchUrl(query, limit) {
-  var q = encodeURIComponent(trim(query))
+  var q = encodeURIComponent(trim(query).slice(0, MAX_QUERY_CHARS))
   var n = parseInt(limit, 10)
   if (!isFinite(n) || n < 1) n = 5
-  if (n > 8) n = 8
+  if (n > MAX_SEARCH_RESULTS) n = MAX_SEARCH_RESULTS
   return "https://nominatim.openstreetmap.org/search?q=" + q
     + "&format=jsonv2&limit=" + n
 }
 
 function placeName(row) {
   if (!row) return "Place"
-  if (row.name) return String(row.name)
-  var display = String(row.display_name || "")
+  if (row.name) return plain(row.name, MAX_NAME_CHARS) || "Place"
+  var display = plain(row.display_name || "", MAX_DESCRIPTION_CHARS)
   var comma = display.indexOf(",")
   return comma > 0 ? trim(display.slice(0, comma)) : (display || "Place")
 }
@@ -103,17 +138,19 @@ function placeName(row) {
 function placeDescription(row) {
   if (!row) return ""
   var name = placeName(row)
-  var display = String(row.display_name || "")
+  var display = plain(row.display_name || "", MAX_DESCRIPTION_CHARS)
   if (display.indexOf(name) === 0)
     display = trim(display.slice(name.length).replace(/^,/, ""))
-  return display
+  return plain(display, MAX_DESCRIPTION_CHARS)
 }
 
 function parseSearchResults(raw) {
   if (oversizeText(raw, MAX_SEARCH_BYTES)) return []
   try {
     var data = JSON.parse(String(raw || "[]"))
-    if (!data || !data.length) return []
+    if (!data || typeof data.length !== "number") return []
+    if (data.length < 1) return []
+    if (data.length > MAX_SEARCH_RESULTS) return []
     var out = []
     for (var i = 0; i < data.length; i++) {
       var row = data[i]
@@ -121,12 +158,13 @@ function parseSearchResults(raw) {
       var lat = parseFloat(row.lat)
       var lon = parseFloat(row.lon)
       if (!isFinite(lat) || !isFinite(lon)) continue
+      if (Math.abs(lat) > 90 || Math.abs(lon) > 180) continue
       out.push({
         name: placeName(row),
         description: placeDescription(row),
         lat: lat,
         lon: lon,
-        type: String(row.type || row.addresstype || "")
+        type: plain(row.type || row.addresstype || "", 32)
       })
     }
     return out
@@ -144,18 +182,20 @@ function coordsPlace(lat, lon) {
 }
 
 function parseLocationFile(raw) {
+  if (oversizeText(raw, MAX_LOCATION_BYTES)) return null
   try {
     var data = JSON.parse(String(raw || ""))
     if (!data || typeof data !== "object") return null
     var lat = parseFloat(data.latitude)
     var lon = parseFloat(data.longitude)
     if (!isFinite(lat) || !isFinite(lon)) return null
+    if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null
     return {
-      name: trim(data.name) || "Current location",
+      name: plain(trim(data.name) || "Current location", MAX_NAME_CHARS),
       description: "Weather location",
       lat: lat,
       lon: lon,
-      type: "current"
+      type: "weather"
     }
   } catch (e) {
     return null
@@ -170,17 +210,19 @@ function parseIpLocation(raw) {
     var lat = parseFloat(data.latitude)
     var lon = parseFloat(data.longitude)
     if (!isFinite(lat) || !isFinite(lon)) return null
+    if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null
     var parts = [data.city, data.region, data.country]
     var name = []
     for (var i = 0; i < parts.length; i++) {
-      if (parts[i]) name.push(String(parts[i]))
+      var piece = plain(parts[i], 80)
+      if (piece) name.push(piece)
     }
     return {
-      name: name.length ? name.join(", ") : "Current location",
+      name: name.length ? name.join(", ").slice(0, MAX_NAME_CHARS) : "Current location",
       description: "Estimated from IP",
       lat: lat,
       lon: lon,
-      type: "current"
+      type: "ip"
     }
   } catch (e) {
     return null
@@ -208,9 +250,9 @@ function capitalize(text) {
 function formatManeuver(step) {
   step = step || {}
   var m = step.maneuver || {}
-  var type = String(m.type || "")
-  var modifier = String(m.modifier || "")
-  var name = trim(step.name)
+  var type = plain(m.type || "", 40)
+  var modifier = plain(m.modifier || "", 40)
+  var name = plain(trim(step.name), MAX_NAME_CHARS)
   var onto = name ? " onto " + name : ""
 
   if (type === "depart") return name ? "Head onto " + name : "Depart"
@@ -235,7 +277,7 @@ function formatManeuver(step) {
 
   if (type === "ramp" || type === "on ramp") turn = "Take the ramp"
   if (type === "off ramp") turn = "Take the off-ramp"
-  return turn + onto
+  return plain(turn + onto, MAX_INSTRUCTION_CHARS)
 }
 
 function parseRoute(raw) {
@@ -246,23 +288,44 @@ function parseRoute(raw) {
     var route = data.routes[0]
     var steps = []
     var legs = route.legs || []
+    if (legs.length > 8) return null
     for (var i = 0; i < legs.length; i++) {
       var list = legs[i].steps || []
+      if (list.length > MAX_ROUTE_STEPS) return null
       for (var j = 0; j < list.length; j++) {
+        if (steps.length >= MAX_ROUTE_STEPS) return null
         var step = list[j] || {}
+        var dist = Number(step.distance)
+        var dur = Number(step.duration)
+        if (!isFinite(dist) || dist < 0) dist = 0
+        if (!isFinite(dur) || dur < 0) dur = 0
         steps.push({
           instruction: formatManeuver(step),
-          distance: Number(step.distance) || 0,
-          duration: Number(step.duration) || 0,
-          name: trim(step.name)
+          distance: dist,
+          duration: dur,
+          name: plain(trim(step.name), MAX_NAME_CHARS)
         })
       }
     }
     var geom = route.geometry && route.geometry.coordinates ? route.geometry.coordinates : []
+    if (geom.length > MAX_ROUTE_COORDS) return null
+    var coords = []
+    for (var k = 0; k < geom.length; k++) {
+      var c = geom[k]
+      if (!c || c.length < 2) continue
+      var lon = Number(c[0])
+      var lat = Number(c[1])
+      if (!isFinite(lat) || !isFinite(lon)) continue
+      coords.push([lon, lat])
+    }
+    var distance = Number(route.distance)
+    var duration = Number(route.duration)
+    if (!isFinite(distance) || distance < 0) distance = 0
+    if (!isFinite(duration) || duration < 0) duration = 0
     return {
-      distance: Number(route.distance) || 0,
-      duration: Number(route.duration) || 0,
-      coordinates: geom,
+      distance: distance,
+      duration: duration,
+      coordinates: coords,
       steps: steps
     }
   } catch (e) {
@@ -318,11 +381,11 @@ function modeLabel(mode) {
 
 function directionsTitle(origin, dest, place, mode) {
   if (mode === "drive" || mode === "walk") {
-    var fromName = origin && origin.name ? origin.name : "Start"
-    var toName = dest && dest.name ? dest.name : "Destination"
+    var fromName = origin && origin.name ? plain(origin.name, MAX_NAME_CHARS) : "Start"
+    var toName = dest && dest.name ? plain(dest.name, MAX_NAME_CHARS) : "Destination"
     return fromName + " → " + toName
   }
-  return place && place.name ? place.name : "Map"
+  return place && place.name ? plain(place.name, MAX_NAME_CHARS) : "Map"
 }
 
 function formatDirectionsText(route, origin, dest, mode, imperial) {
@@ -333,9 +396,10 @@ function formatDirectionsText(route, origin, dest, mode, imperial) {
   if (summary) lines.push(summary)
   lines.push("")
   var steps = route && route.steps ? route.steps : []
-  for (var i = 0; i < steps.length; i++) {
+  var n = Math.min(steps.length, MAX_ROUTE_STEPS)
+  for (var i = 0; i < n; i++) {
     var dist = steps[i].distance > 0 ? " (" + formatDistance(steps[i].distance, imperial) + ")" : ""
-    lines.push((i + 1) + ". " + steps[i].instruction + dist)
+    lines.push((i + 1) + ". " + plain(steps[i].instruction, MAX_INSTRUCTION_CHARS) + dist)
   }
   lines.push("")
   lines.push("© OpenStreetMap contributors")
@@ -356,11 +420,12 @@ function formatDirectionsHtml(route, origin, dest, mode, imperial) {
   var summary = escapeHtml(formatSummary(route, imperial))
   var items = []
   var steps = route && route.steps ? route.steps : []
-  for (var i = 0; i < steps.length; i++) {
+  var n = Math.min(steps.length, MAX_ROUTE_STEPS)
+  for (var i = 0; i < n; i++) {
     var dist = steps[i].distance > 0
       ? " <span>" + escapeHtml(formatDistance(steps[i].distance, imperial)) + "</span>"
       : ""
-    items.push("<li>" + escapeHtml(steps[i].instruction) + dist + "</li>")
+    items.push("<li>" + escapeHtml(plain(steps[i].instruction, MAX_INSTRUCTION_CHARS)) + dist + "</li>")
   }
   return "<!doctype html><html><head><meta charset=\"utf-8\"><title>"
     + heading + "</title><style>"
@@ -371,26 +436,6 @@ function formatDirectionsHtml(route, origin, dest, mode, imperial) {
     + "</style></head><body><h1>" + heading + "</h1><p>" + title
     + (summary ? "<br>" + summary : "") + "</p><ol>" + items.join("")
     + "</ol><p>© OpenStreetMap contributors</p></body></html>"
-}
-
-function printCommand(txtPath, text) {
-  var py = [
-    "import os, subprocess, sys",
-    "path, text = sys.argv[1:3]",
-    "os.makedirs(os.path.dirname(path) or '.', exist_ok=True)",
-    "open(path, 'w', encoding='utf-8').write(text)",
-    "stat = subprocess.run(['lpstat', '-d'], capture_output=True, text=True)",
-    "info = ((stat.stdout or '') + (stat.stderr or '')).lower()",
-    "if 'no system default' in info or 'no destinations' in info or 'unknown destination' in info:",
-    "    print('NO_PRINTER')",
-    "    raise SystemExit(2)",
-    "job = subprocess.run(['lp', path], capture_output=True, text=True)",
-    "if job.returncode != 0:",
-    "    print((job.stderr or job.stdout or 'PRINT_FAILED').strip() or 'PRINT_FAILED')",
-    "    raise SystemExit(1)",
-    "print('PRINTED')"
-  ].join("\n")
-  return ["python3", "-c", py, txtPath, String(text || "")]
 }
 
 function osmPlaceUrl(lat, lon) {
@@ -409,13 +454,65 @@ function osmDirectionsUrl(from, to, mode) {
     + ";" + Number(to.lat) + "," + Number(to.lon)
 }
 
+function isSafeOsmUrl(url) {
+  url = String(url || "")
+  if (url.length < OSM_OPEN_PREFIX.length || url.length > 768) return false
+  if (/[\u0000-\u001F\u007F\\]/.test(url)) return false
+  if (url.indexOf("@") !== -1) return false
+  if (url.indexOf(OSM_OPEN_PREFIX) !== 0) return false
+  if (url.toLowerCase().indexOf("%2f%2f") !== -1) return false
+  return true
+}
+
 function openUrl(place, origin, dest, mode) {
+  var url = ""
   if (mode === "drive" || mode === "walk") {
-    if (origin && dest) return osmDirectionsUrl(origin, dest, mode)
+    if (origin && dest) url = osmDirectionsUrl(origin, dest, mode)
   }
-  if (place) return osmPlaceUrl(place.lat, place.lon)
-  if (dest) return osmPlaceUrl(dest.lat, dest.lon)
-  return ""
+  if (!url && place) url = osmPlaceUrl(place.lat, place.lon)
+  if (!url && dest) url = osmPlaceUrl(dest.lat, dest.lon)
+  return isSafeOsmUrl(url) ? url : ""
+}
+
+function helperPath(pluginDir) {
+  var dir = String(pluginDir || "")
+  if (!dir || dir.indexOf("\x00") >= 0) return ""
+  var parts = dir.split("/")
+  for (var i = 0; i < parts.length; i++) if (parts[i] === "..") return ""
+  if (parts[parts.length - 1] === "") parts.pop()
+  return parts.join("/") + "/bin/" + HELPER_NAME
+}
+
+function helperCommand(pluginDir, verb, args) {
+  var path = helperPath(pluginDir)
+  if (!path) return []
+  if (!/^[a-z]{1,16}$/.test(String(verb || ""))) return []
+  var cmd = ["/usr/bin/python3", "-I", "-S", path, String(verb)]
+  if (args && args.length) {
+    cmd.push("--")
+    for (var i = 0; i < args.length; i++) cmd.push(String(args[i]))
+  }
+  return cmd
+}
+
+function cacheDirPath(home, xdgCache) {
+  home = String(home || "")
+  xdgCache = String(xdgCache || "")
+  if (home && xdgCache && xdgCache.indexOf(home + "/") === 0) return xdgCache + "/quickmap/tiles"
+  return home + "/.cache/quickmap/tiles"
+}
+
+function tileFileName(tile) {
+  if (!tile) return ""
+  var z = Number(tile.z) | 0
+  var x = Number(tile.x) | 0
+  var y = Number(tile.y) | 0
+  if (z < MIN_ZOOM || z > MAX_ZOOM || x < 0 || y < 0) return ""
+  return z + "-" + x + "-" + y + ".png"
+}
+
+function tilesJson(tiles) {
+  return JSON.stringify(uniqueTiles(tiles))
 }
 
 function webMercatorX(lon, zoom) {
@@ -595,83 +692,14 @@ function projectOnView(lat, lon, view, width, height) {
 }
 
 function tilePath(cacheDir, tile) {
-  return String(cacheDir || "") + "/" + tile.z + "-" + tile.x + "-" + tile.y + ".png"
+  var name = tileFileName(tile)
+  if (!name) return ""
+  return String(cacheDir || "") + "/" + name
 }
 
 function tileUrl(tile, baseUrl) {
   var base = String(baseUrl || TILE_BASE_URL).replace(/\/+$/, "")
   return base + "/" + tile.z + "/" + tile.x + "/" + tile.y + ".png"
-}
-
-// curl --max-filesize is ignored for chunked responses, so the helper
-// also caps the body while reading and only then writes stdout or cache.
-function httpFetchPy() {
-  return [
-    "import os, subprocess, sys",
-    "mode, url, dest, ua = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]",
-    "limit, timeout = int(sys.argv[5]), int(sys.argv[6])",
-    "if (mode != \"json\" and mode != \"tile\") or limit < 1 or timeout < 1:",
-    "    raise SystemExit(1)",
-    "cmd = [\"curl\", \"-fsS\", \"--max-time\", str(timeout), \"--max-filesize\", str(limit), \"-A\", ua, url]",
-    "try:",
-    "    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)",
-    "except OSError:",
-    "    raise SystemExit(1)",
-    "buf = bytearray()",
-    "over = False",
-    "while True:",
-    "    n = min(65536, limit + 1 - len(buf))",
-    "    if n <= 0:",
-    "        over = True",
-    "        break",
-    "    chunk = proc.stdout.read(n)",
-    "    if not chunk:",
-    "        break",
-    "    buf.extend(chunk)",
-    "    if len(buf) > limit:",
-    "        over = True",
-    "        break",
-    "if over:",
-    "    try:",
-    "        proc.stdout.close()",
-    "    except OSError:",
-    "        pass",
-    "    try:",
-    "        proc.kill()",
-    "    except OSError:",
-    "        pass",
-    "code = proc.wait()",
-    "if over or code != 0 or len(buf) > limit:",
-    "    raise SystemExit(1)",
-    "if mode == \"tile\":",
-    "    png = b\"\\x89PNG\\r\\n\\x1a\\n\"",
-    "    if len(buf) < 24 or buf[:8] != png or buf[12:16] != b\"IHDR\":",
-    "        raise SystemExit(1)",
-    "    w = int.from_bytes(buf[16:20], \"big\")",
-    "    h = int.from_bytes(buf[20:24], \"big\")",
-    "    if w != " + TILE_SIZE + " or h != " + TILE_SIZE + ":",
-    "        raise SystemExit(1)",
-    "    tmp = dest + \".part\"",
-    "    try:",
-    "        os.remove(tmp)",
-    "    except OSError:",
-    "        pass",
-    "    d = os.path.dirname(dest)",
-    "    if d:",
-    "        os.makedirs(d, exist_ok=True)",
-    "    try:",
-    "        with open(tmp, \"wb\") as out:",
-    "            out.write(buf)",
-    "        os.replace(tmp, dest)",
-    "    except OSError:",
-    "        try:",
-    "            os.remove(tmp)",
-    "        except OSError:",
-    "            pass",
-    "        raise SystemExit(1)",
-    "else:",
-    "    sys.stdout.buffer.write(buf)"
-  ].join("\n")
 }
 
 function wrapTileX(x, zoom) {
@@ -680,7 +708,7 @@ function wrapTileX(x, zoom) {
 }
 
 function uniqueTiles(tiles) {
-  var seen = {}
+  var seen = Object.create(null)
   var out = []
   tiles = tiles || []
   for (var i = 0; i < tiles.length; i++) {
@@ -785,50 +813,6 @@ function prefetchTiles(view, maxTiles) {
   return all
 }
 
-function tileFetchScript(cacheDir, tiles, agent, baseUrl, maxBytes) {
-  maxBytes = parseInt(maxBytes, 10)
-  if (!isFinite(maxBytes) || maxBytes < 1) maxBytes = MAX_TILE_BYTES
-  var lines = [
-    "mkdir -p " + shQuote(cacheDir),
-    "ua=" + shQuote(agent || USER_AGENT),
-    "py=" + shQuote(httpFetchPy()),
-    "missf=$(mktemp)",
-    "n=0",
-    "fetch() {",
-    "  [ -s \"$1\" ] && return 0",
-    "  echo 1 > \"$missf\"",
-    "  python3 -c \"$py\" tile \"$2\" \"$1\" \"$ua\" " + maxBytes + " " + HTTP_TIMEOUT_SEC
-      + " || rm -f \"$1\" \"$1.part\"",
-    "}",
-    "slot() { n=$((n+1)); if [ \"$n\" -ge 2 ]; then wait; n=0; fi; }"
-  ]
-  tiles = tiles || []
-  for (var i = 0; i < tiles.length; i++) {
-    var t = tiles[i]
-    var z = Number(t.z) | 0
-    var x = Number(t.x) | 0
-    var y = Number(t.y) | 0
-    if (z < 0 || x < 0 || y < 0) continue
-    var file = shQuote(cacheDir + "/" + z + "-" + x + "-" + y + ".png")
-    var url = shQuote(tileUrl({ z: z, x: x, y: y }, baseUrl))
-    lines.push("fetch " + file + " " + url + " & slot")
-  }
-  lines.push("wait")
-  lines.push("if [ -s \"$missf\" ]; then echo 1; else echo 0; fi")
-  lines.push("rm -f \"$missf\"")
-  return lines.join("\n")
-}
-
-function curlCommand(url, agent, maxBytes) {
-  maxBytes = parseInt(maxBytes, 10)
-  if (!isFinite(maxBytes) || maxBytes < 1) maxBytes = MAX_SEARCH_BYTES
-  return [
-    "python3", "-c", httpFetchPy(),
-    "json", url, "-", agent || USER_AGENT,
-    String(maxBytes), String(HTTP_TIMEOUT_SEC)
-  ]
-}
-
 function markersFor(mode, place, origin, dest) {
   var out = []
   if (mode === "drive" || mode === "walk") {
@@ -858,9 +842,15 @@ if (typeof module !== "undefined") {
     maxRouteBytes: maxRouteBytes,
     maxLocationBytes: maxLocationBytes,
     maxTileBytes: maxTileBytes,
+    maxQueryChars: maxQueryChars,
+    maxHelperStdout: maxHelperStdout,
+    maxSearchResults: maxSearchResults,
+    maxRouteSteps: maxRouteSteps,
     httpTimeoutSec: httpTimeoutSec,
+    tileSize: tileSize,
     shouldFetchIpLocation: shouldFetchIpLocation,
     trim: trim,
+    plain: plain,
     parseCoords: parseCoords,
     searchUrl: searchUrl,
     parseSearchResults: parseSearchResults,
@@ -880,13 +870,18 @@ if (typeof module !== "undefined") {
     formatDirectionsText: formatDirectionsText,
     formatDirectionsHtml: formatDirectionsHtml,
     escapeHtml: escapeHtml,
-    printCommand: printCommand,
     viewAt: viewAt,
     panView: panView,
     zoomView: zoomView,
     osmPlaceUrl: osmPlaceUrl,
     osmDirectionsUrl: osmDirectionsUrl,
     openUrl: openUrl,
+    isSafeOsmUrl: isSafeOsmUrl,
+    helperPath: helperPath,
+    helperCommand: helperCommand,
+    cacheDirPath: cacheDirPath,
+    tileFileName: tileFileName,
+    tilesJson: tilesJson,
     webMercatorX: webMercatorX,
     webMercatorY: webMercatorY,
     downsampleLine: downsampleLine,
@@ -899,8 +894,8 @@ if (typeof module !== "undefined") {
     childTiles: childTiles,
     prefetchTiles: prefetchTiles,
     offlineTiles: offlineTiles,
-    tileFetchScript: tileFetchScript,
-    curlCommand: curlCommand,
+    tileUrl: tileUrl,
+    tilePath: tilePath,
     markersFor: markersFor,
     moveSuggestion: moveSuggestion,
     emptyView: emptyView

@@ -1,8 +1,9 @@
 # QuickMap
 
 Look up an address or get driving and walking directions in a small Omarchy
-bar popup. Geocoding, routes, and map tiles all come from OpenStreetMap
-services. The bar icon does no network work until you search.
+bar popup. Geocoding, routes, and map tiles come from OpenStreetMap services.
+An IP city estimate is available only after you turn it on. The bar icon does
+no network work until you search, cache tiles, or opt in to that estimate.
 
 ## Install
 
@@ -31,8 +32,9 @@ omarchy plugin add https://github.com/cfaulkingham/quickmap.git --enable
   "Offline — search not available" instead of "No results"
 - **Lookup** — type an address, city, or `lat, lon` and press Enter
 - **Drive** / **Walk** — destination in **To**; leave **From** empty to use
-  your current location (Omarchy weather coordinates first; an IP estimate
-  only if that file has none)
+  your current location (Omarchy weather coordinates first)
+- **Estimate start from IP** is off until you turn it on. It asks ipwho.is
+  for a city-level location only in Drive/Walk when weather has no coords
 - Arrow keys move through suggestions; Enter selects
 - Click the map (or **Expand** / **View all**) for a larger centered map
 - Drag to pan, scroll or use **+** / **−** to zoom; Escape closes the map
@@ -43,9 +45,8 @@ omarchy plugin add https://github.com/cfaulkingham/quickmap.git --enable
 - **Open in browser** opens the same place or route on openstreetmap.org
   in another app
 - Escape closes the expanded map, then the panel
-- **Super+Ctrl+M** toggles the plugin (same pattern as Audio, Network, etc.)
 
-To bind it yourself:
+To bind a compositor shortcut yourself (for example Super+Ctrl+M):
 
 ```sh
 omarchy-shell shell toggle io.github.cfaulkingham.quickmap '{}'
@@ -59,18 +60,22 @@ omarchy bar move io.github.cfaulkingham.quickmap --section right
 
 ## Data
 
-Personal, light use of public OSM endpoints. Each request sends an identifying
-User-Agent. Tiles are cached in `~/.cache/quickmap/tiles`. After a view loads,
-neighboring tiles and the next zoom levels are fetched in the background so pan
-and zoom stay on the cache. **Cache offline** saves a larger block of the area
-you are looking at (a few zoom levels, capped) so that map works without a
-network. Address search and routing still need the internet.
+Personal, light use of public HTTPS endpoints. Nominatim, OSRM, and tile
+requests send an identifying User-Agent. The IP estimate uses a User-Agent
+without an email address. Tiles are cached in `~/.cache/quickmap/tiles`
+(or `$XDG_CACHE_HOME/quickmap/tiles` when that directory is under your home).
+After a view loads, neighboring tiles and the next zoom levels are fetched in
+the background so pan and zoom stay on the cache. **Cache offline** saves a
+larger block of the area you are looking at (a few zoom levels, capped) so
+that map works without a network. Address search, routing, and IP estimates
+still need the internet.
 
-| Need | Service |
-| --- | --- |
-| Address search | [Nominatim](https://nominatim.openstreetmap.org/) |
-| Drive / walk routes | [OSRM](https://router.project-osrm.org/) |
-| Map tiles | [tile.openstreetmap.org](https://operations.osmfoundation.org/policies/tiles/) |
+| Need | Service | When |
+| --- | --- | --- |
+| Address search | [Nominatim](https://nominatim.openstreetmap.org/) | You type a lookup |
+| Drive / walk routes | [OSRM](https://router.project-osrm.org/) | Drive or Walk with both ends set |
+| Map tiles | [tile.openstreetmap.org](https://operations.osmfoundation.org/policies/tiles/) | A map is showing, or you cache offline |
+| Optional city-level IP estimate | [ipwho.is](https://ipwho.is/) | You turn on **Estimate start from IP** |
 
 © OpenStreetMap contributors, [ODbL](https://www.openstreetmap.org/copyright).
 
@@ -79,3 +84,7 @@ network. Address search and routing still need the internet.
 ```sh
 omarchy plugin remove io.github.cfaulkingham.quickmap
 ```
+
+That removes the plugin from Omarchy. Cached map tiles in
+`~/.cache/quickmap/tiles` (or `$XDG_CACHE_HOME/quickmap/tiles`) are kept.
+Delete that folder yourself if you do not want them to remain.
