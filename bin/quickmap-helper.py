@@ -37,6 +37,8 @@ MAX_QUERY_BYTES = 200
 MAX_STDERR = 4096
 MAX_TILES = 220
 MAX_TILE_JOBS = 2
+MAX_VIAS = 8
+MAX_ROUTE_POINTS = MAX_VIAS + 2
 HTTP_TIMEOUT_SEC = 8
 CONNECT_TIMEOUT_SEC = 5
 SEARCH_DEADLINE_SEC = 15
@@ -592,18 +594,32 @@ def _finite_coord(text: str, lo: float, hi: float) -> float:
     return value
 
 
+def route_request_url(mode: str, coords: list[tuple[float, float]]) -> str:
+    if mode not in ("drive", "walk"):
+        raise ValueError("invalid mode")
+    if len(coords) < 2 or len(coords) > MAX_ROUTE_POINTS:
+        raise ValueError("invalid waypoint count")
+    profile = "foot" if mode == "walk" else "driving"
+    parts = ";".join(f"{lon},{lat}" for lat, lon in coords)
+    return f"{OSRM}/{profile}/{parts}?overview=simplified&geometries=geojson&steps=true"
+
+
 def cmd_route(argv: list[str]) -> int:
-    if len(argv) != 5:
+    if len(argv) < 5 or (len(argv) - 1) % 2 != 0:
         return 2
-    mode, lat1, lon1, lat2, lon2 = argv
+    mode = argv[0]
     if mode not in ("drive", "walk"):
         return 2
-    profile = "foot" if mode == "walk" else "driving"
-    a = _finite_coord(lat1, -90, 90)
-    b = _finite_coord(lon1, -180, 180)
-    c = _finite_coord(lat2, -90, 90)
-    d = _finite_coord(lon2, -180, 180)
-    url = f"{OSRM}/{profile}/{b},{a};{d},{c}?overview=simplified&geometries=geojson&steps=true"
+    rest = argv[1:]
+    npoints = len(rest) // 2
+    if npoints < 2 or npoints > MAX_ROUTE_POINTS:
+        return 2
+    coords: list[tuple[float, float]] = []
+    for i in range(0, len(rest), 2):
+        lat = _finite_coord(rest[i], -90, 90)
+        lon = _finite_coord(rest[i + 1], -180, 180)
+        coords.append((lat, lon))
+    url = route_request_url(mode, coords)
     body = http_get(url, MAX_ROUTE_BYTES, min(HTTP_TIMEOUT_SEC, ROUTE_DEADLINE_SEC), USER_AGENT)
     sys.stdout.buffer.write(body)
     return 0

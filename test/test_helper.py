@@ -280,6 +280,32 @@ class HttpSizeTests(unittest.TestCase):
         self.assertIn(b"chunked", headers)
 
 
+class RouteUrlTests(unittest.TestCase):
+    def test_two_points_and_via(self):
+        two = mod.route_request_url("drive", [(38.9, -77.0), (38.8, -77.1)])
+        self.assertIn("/route/v1/driving/", two)
+        self.assertIn("-77.0,38.9;-77.1,38.8", two)
+        self.assertIn("geometries=geojson", two)
+        via = mod.route_request_url("walk", [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)])
+        self.assertIn("/route/v1/foot/", via)
+        self.assertIn("2.0,1.0;4.0,3.0;6.0,5.0", via)
+
+    def test_rejects_bad_counts(self):
+        with self.assertRaises(ValueError):
+            mod.route_request_url("drive", [(1.0, 2.0)])
+        with self.assertRaises(ValueError):
+            mod.route_request_url("bike", [(1.0, 2.0), (3.0, 4.0)])
+        too_many = [(float(i), float(i)) for i in range(mod.MAX_ROUTE_POINTS + 1)]
+        with self.assertRaises(ValueError):
+            mod.route_request_url("drive", too_many)
+
+    def test_cmd_route_arg_shape(self):
+        self.assertEqual(mod.cmd_route(["drive"]), 2)
+        self.assertEqual(mod.cmd_route(["drive", "1", "2", "3"]), 2)
+        self.assertEqual(mod.cmd_route(["drive"] + ["0"] * (mod.MAX_ROUTE_POINTS * 2 + 2)), 2)
+        self.assertEqual(mod.cmd_route(["fly", "1", "2", "3", "4"]), 2)
+
+
 class PrintArgvTests(unittest.TestCase):
     def test_print_reads_stdin_not_argv(self):
         import inspect

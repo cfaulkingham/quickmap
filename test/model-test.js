@@ -76,6 +76,16 @@ const from = { lat: 38.8977, lon: -77.0365 }
 const to = { lat: 38.8899, lon: -77.0091 }
 assert.ok(Model.routeUrl("drive", from, to).indexOf("/route/v1/driving/") !== -1)
 assert.ok(Model.routeUrl("walk", from, to).indexOf("/route/v1/foot/") !== -1)
+const via = { lat: 38.89, lon: -77.02 }
+const viaUrl = Model.routeUrl("drive", from, to, [via])
+assert.ok(viaUrl.indexOf("-77.0365,38.8977;-77.02,38.89;-77.0091,38.8899") !== -1)
+assert.deepStrictEqual(
+  Model.helperRouteArgs("walk", from, to, [via]),
+  ["walk", "38.8977", "-77.0365", "38.89", "-77.02", "38.8899", "-77.0091"]
+)
+assert.strictEqual(Model.sanitizeVias([{ lat: 1, lon: 2 }, { lat: 99, lon: 0 }]).length, 1)
+assert.strictEqual(Model.maxVias(), 8)
+assert.strictEqual(Model.routePoints(from, to, new Array(20).fill(via)).length, Model.maxVias() + 2)
 
 const osrm = {
   code: "Ok",
@@ -90,11 +100,19 @@ const osrm = {
         { name: "", distance: 0, duration: 0, maneuver: { type: "arrive" } }
       ]
     }]
-  }]
+  }],
+  waypoints: [
+    { location: [-77.0365, 38.8977] },
+    { location: [-77.02, 38.89] },
+    { location: [-77.0091, 38.8899] }
+  ]
 }
 const route = Model.parseRoute(JSON.stringify(osrm))
 assert.strictEqual(route.distance, 3416.4)
 assert.strictEqual(route.steps.length, 3)
+assert.strictEqual(route.waypoints.length, 3)
+assert.deepStrictEqual(Model.snappedVias(route, 1), [{ lat: 38.89, lon: -77.02 }])
+assert.deepStrictEqual(Model.snappedVias(route, 2), [])
 assert.strictEqual(route.steps[0].instruction, "Head onto Pennsylvania Avenue")
 assert.strictEqual(route.steps[1].instruction, "Turn right onto 15th Street")
 assert.strictEqual(route.steps[2].instruction, "Arrive")
@@ -110,6 +128,30 @@ const tooManySteps = {
   }]
 }
 assert.strictEqual(Model.parseRoute(JSON.stringify(tooManySteps)), null)
+const manyLegs = {
+  code: "Ok",
+  routes: [{
+    distance: 1,
+    duration: 1,
+    geometry: { coordinates: [[0, 0], [1, 1]] },
+    legs: new Array(Model.maxVias() + 1).fill({
+      steps: [{ name: "A", distance: 1, duration: 1, maneuver: { type: "continue" } }]
+    })
+  }]
+}
+assert.ok(Model.parseRoute(JSON.stringify(manyLegs)))
+const tooManyLegs = {
+  code: "Ok",
+  routes: [{
+    distance: 1,
+    duration: 1,
+    geometry: { coordinates: [[0, 0]] },
+    legs: new Array(Model.maxVias() + 2).fill({
+      steps: [{ name: "A", distance: 1, duration: 1, maneuver: { type: "continue" } }]
+    })
+  }]
+}
+assert.strictEqual(Model.parseRoute(JSON.stringify(tooManyLegs)), null)
 
 assert.strictEqual(Model.formatDistance(250, false), "250 m")
 assert.strictEqual(Model.formatDistance(2500, false), "2.5 km")
@@ -127,6 +169,8 @@ assert.ok(placeUrl.indexOf("mlat=38.9") !== -1)
 const dirUrl = Model.osmDirectionsUrl(from, to, "walk")
 assert.ok(dirUrl.indexOf("fossgis_osrm_foot") !== -1)
 assert.ok(Model.openUrl(null, from, to, "drive").indexOf("fossgis_osrm_car") !== -1)
+const viaDir = Model.osmDirectionsUrl(from, to, "drive", [via])
+assert.ok(viaDir.indexOf("38.89,-77.02") !== -1)
 
 assert.strictEqual(Model.webMercatorX(-180, 1), 0)
 assert.strictEqual(Model.webMercatorX(180, 1), 2)
@@ -145,6 +189,27 @@ assert.strictEqual(view.zoom, 15)
 const centered = Model.projectOnView(0, 0, view, 200, 100)
 assert.ok(Math.abs(centered.x - 100) < 1)
 assert.ok(Math.abs(centered.y - 50) < 1)
+const back = Model.unprojectOnView(centered.x, centered.y, view, 200, 100)
+assert.ok(Math.abs(back.lat) < 0.02)
+assert.ok(Math.abs(back.lon) < 0.02)
+
+const wideMap = Model.viewSizeForPixels(900, 360)
+assert.ok(Math.abs(wideMap.cols / wideMap.rows - 900 / 360) < 0.02)
+const sized = Model.fitView([{ lat: 0, lon: 0 }, { lat: 0.2, lon: 0.4 }], wideMap.cols, wideMap.rows)
+assert.ok(Math.abs(sized.cols / sized.rows - 900 / 360) < 0.02)
+const resized = Model.resizeView(sized, wideMap.cols * 1.1, wideMap.rows * 1.1)
+assert.strictEqual(resized.zoom, sized.zoom)
+assert.ok(Math.abs((resized.tileX + resized.cols / 2) - (sized.tileX + sized.cols / 2)) < 1e-6)
+
+const lineCoords = [[-77.0365, 38.8977], [-77.02, 38.89], [-77.0091, 38.8899]]
+const mid = Model.projectOnView(38.89, -77.02, sized, 900, 360)
+const near = Model.nearestOnRoute(lineCoords, sized, 900, 360, mid.x, mid.y)
+assert.ok(near)
+assert.ok(near.dist < 2)
+const slot = Model.viaInsertIndex(lineCoords, [], sized, 900, 360, 38.89, -77.02)
+assert.strictEqual(slot, 0)
+assert.strictEqual(Model.hitIndex([{ lat: 38.89, lon: -77.02 }], sized, 900, 360, mid.x, mid.y, 20), 0)
+assert.strictEqual(Model.hitIndex([{ lat: 38.89, lon: -77.02 }], sized, 900, 360, 0, 0, 8), -1)
 
 const wide = Model.fitView([{ lat: 0, lon: 0 }, { lat: 1, lon: 1 }])
 assert.ok(wide.zoom < 15)

@@ -12,8 +12,10 @@ Item {
   property bool opened: false
   property var view: null
   property var markers: []
+  property var vias: []
   property var route: []
   property var steps: []
+  property bool routeEditable: false
   property string cacheDir: ""
   property bool tilesReady: false
   property string title: ""
@@ -32,12 +34,21 @@ Item {
 
   readonly property real mapWidth: map.width
   readonly property real mapHeight: map.height
+  readonly property var fitSize: Model.viewSizeForPixels(
+    map.width >= 32 ? map.width : 800,
+    map.height >= 32 ? map.height : 320
+  )
+  readonly property real viewCols: fitSize.cols
+  readonly property real viewRows: fitSize.rows
 
   signal closeRequested()
   signal printRequested()
   signal cacheRequested()
   signal panRequested(real dx, real dy)
   signal zoomRequested(int delta, real ax, real ay)
+  signal viaCommitted(int index, real lat, real lon, bool isNew)
+  signal viaRemoved(int index)
+  signal mapSizeChanged()
 
   function zoomIn() {
     if (!map.width || !map.height) return
@@ -176,8 +187,10 @@ Item {
             id: map
             anchors.fill: parent
             interactive: true
+            routeEditable: root.routeEditable
             view: root.view
             markers: root.markers
+            vias: root.vias
             route: root.route
             cacheDir: root.cacheDir
             tilesReady: root.tilesReady
@@ -185,6 +198,12 @@ Item {
             accent: Color.accent
             onPanRequested: function(dx, dy) { root.panRequested(dx, dy) }
             onZoomRequested: function(delta, ax, ay) { root.zoomRequested(delta, ax, ay) }
+            onViaCommitted: function(index, lat, lon, isNew) {
+              root.viaCommitted(index, lat, lon, isNew)
+            }
+            onViaRemoved: function(index) { root.viaRemoved(index) }
+            onWidthChanged: root.mapSizeChanged()
+            onHeightChanged: root.mapSizeChanged()
           }
 
           Column {
@@ -251,7 +270,9 @@ Item {
             textFormat: Text.PlainText
             text: root.statusText !== ""
               ? root.statusText
-              : "Drag to pan · scroll to zoom · © OpenStreetMap"
+              : (root.routeEditable
+                ? "Drag the route to change it · click a point to remove it · © OpenStreetMap"
+                : "Drag to pan · scroll to zoom · © OpenStreetMap")
             color: Qt.darker(root.foreground, 1.6)
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

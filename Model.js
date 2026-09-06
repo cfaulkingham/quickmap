@@ -8,8 +8,14 @@ var MAX_TILE_COLS = 2
 var MAX_TILE_ROWS = 1
 var MODAL_TILE_COLS = 4
 var MODAL_TILE_ROWS = 3
+var MAX_VIEW_COLS = 12
+var MAX_VIEW_ROWS = 8
 var MIN_ZOOM = 2
 var MAX_ZOOM = 18
+var MAX_VIAS = 8
+var MAX_ROUTE_POINTS = MAX_VIAS + 2
+var ROUTE_HIT_PX = 14
+var VIA_HIT_PX = 16
 var HTTP_TIMEOUT_SEC = 8
 var MAX_SEARCH_BYTES = 64 * 1024
 var MAX_ROUTE_BYTES = 256 * 1024
@@ -65,6 +71,22 @@ function maxSearchResults() {
 
 function maxRouteSteps() {
   return MAX_ROUTE_STEPS
+}
+
+function maxVias() {
+  return MAX_VIAS
+}
+
+function maxRoutePoints() {
+  return MAX_ROUTE_POINTS
+}
+
+function routeHitPx() {
+  return ROUTE_HIT_PX
+}
+
+function viaHitPx() {
+  return VIA_HIT_PX
 }
 
 function httpTimeoutSec() {
@@ -233,12 +255,52 @@ function routeProfile(mode) {
   return mode === "walk" ? "foot" : "driving"
 }
 
-function routeUrl(mode, from, to) {
-  if (!from || !to) return ""
-  var a = Number(from.lon) + "," + Number(from.lat)
-  var b = Number(to.lon) + "," + Number(to.lat)
+function validCoord(point) {
+  if (!point) return false
+  var lat = Number(point.lat)
+  var lon = Number(point.lon)
+  return isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
+}
+
+function sanitizeVias(vias) {
+  var out = []
+  vias = vias || []
+  for (var i = 0; i < vias.length && out.length < MAX_VIAS; i++) {
+    var v = vias[i]
+    if (!validCoord(v)) continue
+    out.push({ lat: Number(v.lat), lon: Number(v.lon) })
+  }
+  return out
+}
+
+function routePoints(from, to, vias) {
+  var pts = []
+  if (validCoord(from)) pts.push({ lat: Number(from.lat), lon: Number(from.lon) })
+  var stops = sanitizeVias(vias)
+  for (var i = 0; i < stops.length; i++) pts.push(stops[i])
+  if (validCoord(to)) pts.push({ lat: Number(to.lat), lon: Number(to.lon) })
+  return pts
+}
+
+function routeUrl(mode, from, to, vias) {
+  var pts = routePoints(from, to, vias)
+  if (pts.length < 2) return ""
+  var parts = []
+  for (var i = 0; i < pts.length; i++)
+    parts.push(Number(pts[i].lon) + "," + Number(pts[i].lat))
   return "https://router.project-osrm.org/route/v1/" + routeProfile(mode)
-    + "/" + a + ";" + b + "?overview=simplified&geometries=geojson&steps=true"
+    + "/" + parts.join(";") + "?overview=simplified&geometries=geojson&steps=true"
+}
+
+function helperRouteArgs(mode, from, to, vias) {
+  var pts = routePoints(from, to, vias)
+  if (pts.length < 2) return []
+  var args = [String(mode)]
+  for (var i = 0; i < pts.length; i++) {
+    args.push(String(pts[i].lat))
+    args.push(String(pts[i].lon))
+  }
+  return args
 }
 
 function capitalize(text) {
@@ -288,7 +350,7 @@ function parseRoute(raw) {
     var route = data.routes[0]
     var steps = []
     var legs = route.legs || []
-    if (legs.length > 8) return null
+    if (legs.length > MAX_VIAS + 1) return null
     for (var i = 0; i < legs.length; i++) {
       var list = legs[i].steps || []
       if (list.length > MAX_ROUTE_STEPS) return null
@@ -322,11 +384,24 @@ function parseRoute(raw) {
     var duration = Number(route.duration)
     if (!isFinite(distance) || distance < 0) distance = 0
     if (!isFinite(duration) || duration < 0) duration = 0
+    var waypoints = []
+    var wps = data.waypoints || []
+    if (wps.length > MAX_ROUTE_POINTS) return null
+    for (var w = 0; w < wps.length; w++) {
+      var loc = wps[w] && wps[w].location ? wps[w].location : null
+      if (!loc || loc.length < 2) continue
+      var wlon = Number(loc[0])
+      var wlat = Number(loc[1])
+      if (!isFinite(wlat) || !isFinite(wlon)) continue
+      if (Math.abs(wlat) > 90 || Math.abs(wlon) > 180) continue
+      waypoints.push({ lat: wlat, lon: wlon })
+    }
     return {
       distance: distance,
       duration: duration,
       coordinates: coords,
-      steps: steps
+      steps: steps,
+      waypoints: waypoints
     }
   } catch (e) {
     return null
@@ -446,12 +521,15 @@ function osmPlaceUrl(lat, lon) {
     + "#map=16/" + lat + "/" + lon
 }
 
-function osmDirectionsUrl(from, to, mode) {
-  if (!from || !to) return ""
+function osmDirectionsUrl(from, to, mode, vias) {
+  var pts = routePoints(from, to, vias)
+  if (pts.length < 2) return ""
   var engine = mode === "walk" ? "fossgis_osrm_foot" : "fossgis_osrm_car"
+  var parts = []
+  for (var i = 0; i < pts.length; i++)
+    parts.push(Number(pts[i].lat) + "," + Number(pts[i].lon))
   return "https://www.openstreetmap.org/directions?engine=" + engine
-    + "&route=" + Number(from.lat) + "," + Number(from.lon)
-    + ";" + Number(to.lat) + "," + Number(to.lon)
+    + "&route=" + parts.join(";")
 }
 
 function isSafeOsmUrl(url) {
@@ -464,10 +542,10 @@ function isSafeOsmUrl(url) {
   return true
 }
 
-function openUrl(place, origin, dest, mode) {
+function openUrl(place, origin, dest, mode, vias) {
   var url = ""
   if (mode === "drive" || mode === "walk") {
-    if (origin && dest) url = osmDirectionsUrl(origin, dest, mode)
+    if (origin && dest) url = osmDirectionsUrl(origin, dest, mode, vias)
   }
   if (!url && place) url = osmPlaceUrl(place.lat, place.lon)
   if (!url && dest) url = osmPlaceUrl(dest.lat, dest.lon)
@@ -559,12 +637,56 @@ function pointsFrom(place, origin, dest, route) {
   return points
 }
 
+function clampViewSize(cols, rows) {
+  cols = Number(cols)
+  rows = Number(rows)
+  if (!isFinite(cols) || cols < 1) cols = MAX_TILE_COLS
+  if (!isFinite(rows) || rows < 1) rows = MAX_TILE_ROWS
+  if (cols > MAX_VIEW_COLS) cols = MAX_VIEW_COLS
+  if (rows > MAX_VIEW_ROWS) rows = MAX_VIEW_ROWS
+  return { cols: cols, rows: rows }
+}
+
+function viewSizeForPixels(width, height, maxTiles) {
+  width = Number(width)
+  height = Number(height)
+  maxTiles = parseInt(maxTiles, 10)
+  if (!isFinite(maxTiles) || maxTiles < 4) maxTiles = 12
+  if (!isFinite(width) || width < 1 || !isFinite(height) || height < 1)
+    return { cols: MAX_TILE_COLS, rows: MAX_TILE_ROWS }
+
+  var cols = width / TILE_SIZE
+  var rows = height / TILE_SIZE
+  var area = cols * rows
+  if (area > maxTiles) {
+    var s = Math.sqrt(maxTiles / area)
+    cols *= s
+    rows *= s
+  }
+  if (cols < 1) {
+    rows = rows / cols
+    cols = 1
+  }
+  if (rows < 1) {
+    cols = cols / rows
+    rows = 1
+  }
+  return clampViewSize(cols, rows)
+}
+
+function resizeView(view, cols, rows) {
+  if (!view || !view.cols || !view.rows) return emptyView()
+  var size = clampViewSize(cols, rows)
+  var cx = view.tileX + view.cols / 2
+  var cy = view.tileY + view.rows / 2
+  return viewAt(view.zoom, cx - size.cols / 2, cy - size.rows / 2, size.cols, size.rows)
+}
+
 function fitView(points, maxCols, maxRows) {
   points = points || []
-  maxCols = parseInt(maxCols, 10)
-  maxRows = parseInt(maxRows, 10)
-  if (!isFinite(maxCols) || maxCols < 1) maxCols = MAX_TILE_COLS
-  if (!isFinite(maxRows) || maxRows < 1) maxRows = MAX_TILE_ROWS
+  var size = clampViewSize(maxCols, maxRows)
+  maxCols = size.cols
+  maxRows = size.rows
   if (!points.length) return emptyView()
 
   var minLat = 90, maxLat = -90, minLon = 180, maxLon = -180
@@ -601,10 +723,9 @@ function viewAt(zoom, originX, originY, cols, rows) {
   zoom = Math.round(Number(zoom))
   if (!isFinite(zoom)) zoom = 15
   zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM)
-  cols = parseInt(cols, 10)
-  rows = parseInt(rows, 10)
-  if (!isFinite(cols) || cols < 1) cols = MAX_TILE_COLS
-  if (!isFinite(rows) || rows < 1) rows = MAX_TILE_ROWS
+  var size = clampViewSize(cols, rows)
+  cols = size.cols
+  rows = size.rows
 
   var n = Math.pow(2, zoom)
   originX = Number(originX)
@@ -689,6 +810,127 @@ function projectOnView(lat, lon, view, width, height) {
     x: dx / view.cols * width,
     y: (my - view.tileY) / view.rows * height
   }
+}
+
+function unprojectOnView(x, y, view, width, height) {
+  if (!view || !view.cols || !view.rows) return { lat: 0, lon: 0 }
+  width = Number(width)
+  height = Number(height)
+  if (!width || !height) return { lat: 0, lon: 0 }
+  var n = Math.pow(2, view.zoom)
+  var mx = view.tileX + Number(x) / width * view.cols
+  var my = view.tileY + Number(y) / height * view.rows
+  mx = ((mx % n) + n) % n
+  if (my < 0) my = 0
+  if (my > n) my = n
+  var lon = mx / n * 360 - 180
+  var lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * my / n))) * 180 / Math.PI
+  return {
+    lat: clamp(lat, -85.0511, 85.0511),
+    lon: clamp(lon, -180, 180)
+  }
+}
+
+function distPointToSeg(px, py, ax, ay, bx, by) {
+  var dx = bx - ax
+  var dy = by - ay
+  var len2 = dx * dx + dy * dy
+  var t = 0
+  if (len2 > 0) t = clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1)
+  var x = ax + t * dx
+  var y = ay + t * dy
+  var ddx = px - x
+  var ddy = py - y
+  return { dist: Math.sqrt(ddx * ddx + ddy * ddy), t: t, x: x, y: y }
+}
+
+function nearestOnRoute(coords, view, width, height, px, py) {
+  coords = coords || []
+  if (coords.length < 2 || !view) return null
+  var segs = []
+  for (var i = 0; i < coords.length - 1; i++) {
+    var c0 = coords[i]
+    var c1 = coords[i + 1]
+    if (!c0 || c0.length < 2 || !c1 || c1.length < 2) continue
+    var a = projectOnView(c0[1], c0[0], view, width, height)
+    var b = projectOnView(c1[1], c1[0], view, width, height)
+    var len = Math.sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y))
+    segs.push({ a: a, b: b, len: len })
+  }
+  if (!segs.length) return null
+  var best = null
+  var bestDist = Infinity
+  var walked = 0
+  var bestAlong = 0
+  for (var j = 0; j < segs.length; j++) {
+    var s = segs[j]
+    var hit = distPointToSeg(px, py, s.a.x, s.a.y, s.b.x, s.b.y)
+    if (hit.dist < bestDist) {
+      bestDist = hit.dist
+      bestAlong = walked + hit.t * s.len
+      best = hit
+    }
+    walked += s.len
+  }
+  if (!best) return null
+  var geo = unprojectOnView(best.x, best.y, view, width, height)
+  return {
+    dist: bestDist,
+    along: bestAlong,
+    lat: geo.lat,
+    lon: geo.lon,
+    x: best.x,
+    y: best.y
+  }
+}
+
+function alongRoute(coords, view, width, height, lat, lon) {
+  var p = projectOnView(lat, lon, view, width, height)
+  var hit = nearestOnRoute(coords, view, width, height, p.x, p.y)
+  return hit ? hit.along : 0
+}
+
+function viaInsertIndex(coords, vias, view, width, height, lat, lon) {
+  vias = vias || []
+  var dropAt = alongRoute(coords, view, width, height, lat, lon)
+  var idx = 0
+  for (var i = 0; i < vias.length; i++) {
+    if (!validCoord(vias[i])) continue
+    var at = alongRoute(coords, view, width, height, vias[i].lat, vias[i].lon)
+    if (at < dropAt) idx = i + 1
+  }
+  return idx
+}
+
+function hitIndex(points, view, width, height, px, py, radius) {
+  points = points || []
+  radius = Number(radius)
+  if (!isFinite(radius) || radius < 1) radius = VIA_HIT_PX
+  var best = -1
+  var bestDist = radius
+  for (var i = 0; i < points.length; i++) {
+    var p = points[i]
+    if (!validCoord(p)) continue
+    var q = projectOnView(p.lat, p.lon, view, width, height)
+    var d = Math.sqrt((q.x - px) * (q.x - px) + (q.y - py) * (q.y - py))
+    if (d <= bestDist) {
+      bestDist = d
+      best = i
+    }
+  }
+  return best
+}
+
+function snappedVias(route, viaCount) {
+  viaCount = parseInt(viaCount, 10)
+  if (!isFinite(viaCount) || viaCount < 1) return []
+  if (!route || !route.waypoints || route.waypoints.length !== viaCount + 2) return []
+  var out = []
+  for (var i = 1; i < route.waypoints.length - 1; i++) {
+    var p = route.waypoints[i]
+    if (validCoord(p)) out.push({ lat: Number(p.lat), lon: Number(p.lon) })
+  }
+  return out.length === viaCount ? out : []
 }
 
 function tilePath(cacheDir, tile) {
@@ -846,6 +1088,10 @@ if (typeof module !== "undefined") {
     maxHelperStdout: maxHelperStdout,
     maxSearchResults: maxSearchResults,
     maxRouteSteps: maxRouteSteps,
+    maxVias: maxVias,
+    maxRoutePoints: maxRoutePoints,
+    routeHitPx: routeHitPx,
+    viaHitPx: viaHitPx,
     httpTimeoutSec: httpTimeoutSec,
     tileSize: tileSize,
     shouldFetchIpLocation: shouldFetchIpLocation,
@@ -858,7 +1104,11 @@ if (typeof module !== "undefined") {
     parseLocationFile: parseLocationFile,
     parseIpLocation: parseIpLocation,
     routeProfile: routeProfile,
+    validCoord: validCoord,
+    sanitizeVias: sanitizeVias,
+    routePoints: routePoints,
     routeUrl: routeUrl,
+    helperRouteArgs: helperRouteArgs,
     formatManeuver: formatManeuver,
     parseRoute: parseRoute,
     useImperial: useImperial,
@@ -873,6 +1123,9 @@ if (typeof module !== "undefined") {
     viewAt: viewAt,
     panView: panView,
     zoomView: zoomView,
+    clampViewSize: clampViewSize,
+    viewSizeForPixels: viewSizeForPixels,
+    resizeView: resizeView,
     osmPlaceUrl: osmPlaceUrl,
     osmDirectionsUrl: osmDirectionsUrl,
     openUrl: openUrl,
@@ -888,6 +1141,13 @@ if (typeof module !== "undefined") {
     pointsFrom: pointsFrom,
     fitView: fitView,
     projectOnView: projectOnView,
+    unprojectOnView: unprojectOnView,
+    distPointToSeg: distPointToSeg,
+    nearestOnRoute: nearestOnRoute,
+    alongRoute: alongRoute,
+    viaInsertIndex: viaInsertIndex,
+    hitIndex: hitIndex,
+    snappedVias: snappedVias,
     uniqueTiles: uniqueTiles,
     neighborTiles: neighborTiles,
     parentTiles: parentTiles,

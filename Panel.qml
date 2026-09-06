@@ -20,6 +20,9 @@ Panel {
   property var fromPlace: null
   property var toPlace: null
   property var route: null
+  property var vias: []
+  property var viasBeforeEdit: []
+  property bool viaEdit: false
   property var weatherLocation: null
   property var ipLocation: null
   property bool ipOptIn: false
@@ -214,8 +217,10 @@ Panel {
       root.setPlaceOnField("to", root.place)
     if (next === "lookup" && !root.place && root.toPlace)
       root.setPlaceOnField("query", root.toPlace)
-    if (next === "lookup") root.route = null
-    else {
+    if (next === "lookup") {
+      root.route = null
+      root.clearVias()
+    } else {
       root.maybeFetchIpLocation()
       root.maybeRoute()
     }
@@ -253,6 +258,7 @@ Panel {
   function onOriginTextChanged(text) {
     if (Model.trim(text) === "") {
       root.fromPlace = null
+      root.clearVias()
       root.suggestions = []
       searchDebounce.stop()
       root.maybeFetchIpLocation()
@@ -267,6 +273,7 @@ Panel {
     if (Model.trim(text) === "") {
       root.toPlace = null
       root.route = null
+      root.clearVias()
       root.suggestions = []
       searchDebounce.stop()
       root.refreshMap()
@@ -287,6 +294,7 @@ Panel {
     if (name === "to") root.toPlace = null
     if (name === "query") root.place = null
     root.route = null
+    root.clearVias()
     root.status = ""
     var coords = Model.parseCoords(text)
     if (coords) {
@@ -360,8 +368,13 @@ Panel {
     root.status = ""
     searchDebounce.stop()
     root.setPlaceOnField(name, item)
-    if (root.mode === "lookup") root.route = null
-    else root.maybeRoute()
+    if (root.mode === "lookup") {
+      root.route = null
+      root.clearVias()
+    } else {
+      root.clearVias()
+      root.maybeRoute()
+    }
     root.refreshMap()
   }
 
@@ -379,22 +392,67 @@ Panel {
       root.routeQueued = true
       return
     }
+    var args = Model.helperRouteArgs(root.mode, root.effectiveOrigin, root.toPlace, root.vias)
+    if (!args.length) return
     root.routing = true
     root.status = ""
-    if (!root.armHelper(routeProc, "route", [
-      root.mode,
-      String(root.effectiveOrigin.lat),
-      String(root.effectiveOrigin.lon),
-      String(root.toPlace.lat),
-      String(root.toPlace.lon)
-    ])) {
+    if (!root.armHelper(routeProc, "route", args)) {
       root.routing = false
       return
     }
     root.startProc(routeProc, routeKill)
   }
 
-  function refreshMap() {
+  function clearVias() {
+    root.vias = []
+    root.viasBeforeEdit = []
+    root.viaEdit = false
+  }
+
+  function revertViaEdit() {
+    if (!root.viaEdit) return
+    root.vias = root.copyVias(root.viasBeforeEdit)
+    root.viaEdit = false
+  }
+
+  function copyVias(list) {
+    return Model.sanitizeVias(list)
+  }
+
+  function commitVia(index, lat, lon, isNew) {
+    if (root.mode !== "drive" && root.mode !== "walk") return
+    if (!root.route) return
+    var point = { lat: Number(lat), lon: Number(lon) }
+    if (!Model.validCoord(point)) return
+    root.viasBeforeEdit = root.copyVias(root.vias)
+    var next = root.copyVias(root.vias)
+    if (isNew) {
+      if (next.length >= Model.maxVias()) return
+      var slot = Model.viaInsertIndex(
+        root.mapRoute, next, root.modalView || root.mapView,
+        mapModal.mapWidth, mapModal.mapHeight, point.lat, point.lon
+      )
+      next.splice(slot, 0, point)
+    } else {
+      if (index < 0 || index >= next.length) return
+      next[index] = point
+    }
+    root.vias = next
+    root.viaEdit = true
+    root.maybeRoute()
+  }
+
+  function removeVia(index) {
+    var next = root.copyVias(root.vias)
+    if (index < 0 || index >= next.length) return
+    root.viasBeforeEdit = root.copyVias(root.vias)
+    next.splice(index, 1)
+    root.vias = next
+    root.viaEdit = true
+    root.maybeRoute()
+  }
+
+  function refreshMap(keepModalView) {
     var lookupPlace = root.mode === "lookup" ? root.place : null
     var origin = root.mode === "lookup" ? null : root.effectiveOrigin
     var dest = root.mode === "lookup" ? null : root.toPlace
@@ -407,7 +465,7 @@ Panel {
     root.tilesReady = false
     if (!root.mapView || !root.mapView.tiles || !root.mapView.tiles.length) return
     root.fetchTiles()
-    if (root.modalOpen) root.resetModalView()
+    if (root.modalOpen && !keepModalView) root.resetModalView()
   }
 
   function fetchTiles() {
@@ -437,15 +495,26 @@ Panel {
   }
 
   function resetModalView() {
-    root.modalView = Model.fitView(root.mapPoints(), 3, 2)
+    root.modalView = Model.fitView(root.mapPoints(), mapModal.viewCols, mapModal.viewRows)
+    root.modalTilesReady = false
+    root.fetchModalTiles()
+  }
+
+  function syncModalViewSize() {
+    if (!root.modalOpen || !root.modalView) return
+    if (mapModal.mapWidth < 32 || mapModal.mapHeight < 32) return
+    var size = Model.viewSizeForPixels(mapModal.mapWidth, mapModal.mapHeight)
+    var v = root.modalView
+    if (Math.abs(v.cols - size.cols) < 0.02 && Math.abs(v.rows - size.rows) < 0.02) return
+    root.modalView = Model.resizeView(v, size.cols, size.rows)
     root.modalTilesReady = false
     root.fetchModalTiles()
   }
 
   function openModal() {
     if (!root.showMap) return
-    root.resetModalView()
     root.modalOpen = true
+    root.resetModalView()
   }
 
   function panModal(dx, dy) {
@@ -532,7 +601,7 @@ Panel {
   }
 
   function openInOsm() {
-    var url = Model.openUrl(root.place, root.effectiveOrigin, root.toPlace, root.mode)
+    var url = Model.openUrl(root.place, root.effectiveOrigin, root.toPlace, root.mode, root.vias)
     if (url) Quickshell.execDetached(["/usr/bin/xdg-open", "--", url])
   }
 
@@ -647,19 +716,41 @@ Panel {
       if (root.routeQueued) {
         root.routeQueued = false
         Qt.callLater(root.maybeRoute)
+        return
       }
-      if (routeProc.overflow) return
+      if (routeProc.overflow) {
+        root.revertViaEdit()
+        return
+      }
       if (code !== 0) {
+        root.revertViaEdit()
         root.markOffline()
         return
       }
       var raw = String(routeProc.buf || "").trim()
-      if (!raw) return
+      if (!raw) {
+        root.revertViaEdit()
+        return
+      }
       root.markOnline()
       var parsed = Model.parseRoute(raw)
+      if (!parsed) {
+        if (root.viaEdit) {
+          root.revertViaEdit()
+          root.status = "No route found"
+          return
+        }
+        root.route = null
+        root.status = "No route found"
+        root.refreshMap()
+        return
+      }
+      var keepView = root.viaEdit
       root.route = parsed
-      if (!parsed) root.status = "No route found"
-      root.refreshMap()
+      var snapped = Model.snappedVias(parsed, root.vias.length)
+      if (snapped.length) root.vias = snapped
+      root.viaEdit = false
+      root.refreshMap(keepView)
     }
   }
 
@@ -1166,6 +1257,7 @@ Panel {
             anchors.fill: parent
             view: root.mapView
             markers: root.mapMarkers
+            vias: root.vias
             route: root.mapRoute
             cacheDir: root.cacheDir
             tilesReady: root.tilesReady
@@ -1292,7 +1384,7 @@ Panel {
               id: osmButton
               text: "Open in browser"
               tooltipText: "Opens OpenStreetMap in another app"
-              enabled: root.hasMap && Model.openUrl(root.place, root.effectiveOrigin, root.toPlace, root.mode) !== ""
+              enabled: root.hasMap && Model.openUrl(root.place, root.effectiveOrigin, root.toPlace, root.mode, root.vias) !== ""
               foreground: root.contentForeground
               fontFamily: root.contentFontFamily
               fontSize: Style.font.bodySmall
@@ -1311,8 +1403,10 @@ Panel {
     opened: root.modalOpen && root.opened
     view: root.modalView
     markers: root.mapMarkers
+    vias: root.vias
     route: root.mapRoute
     steps: root.routeSteps
+    routeEditable: (root.mode === "drive" || root.mode === "walk") && !!root.route
     cacheDir: root.cacheDir
     tilesReady: root.modalTilesReady
     title: root.modalTitle
@@ -1320,7 +1414,9 @@ Panel {
     canPrint: root.routeSteps.length > 0
     canCache: root.hasMap
     caching: root.cachingOffline
-    statusText: root.modalStatus
+    statusText: root.modalStatus !== ""
+      ? root.modalStatus
+      : (root.routing ? "Routing…" : "")
     imperial: root.imperial
     foreground: root.contentForeground
     fontFamily: root.contentFontFamily
@@ -1329,5 +1425,10 @@ Panel {
     onCacheRequested: root.cacheOffline()
     onPanRequested: function(dx, dy) { root.panModal(dx, dy) }
     onZoomRequested: function(delta, ax, ay) { root.zoomModal(delta, ax, ay) }
+    onViaCommitted: function(index, lat, lon, isNew) {
+      root.commitVia(index, lat, lon, isNew)
+    }
+    onViaRemoved: function(index) { root.removeVia(index) }
+    onMapSizeChanged: root.syncModalViewSize()
   }
 }

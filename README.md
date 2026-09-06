@@ -36,7 +36,9 @@ omarchy plugin add https://github.com/cfaulkingham/quickmap.git --enable
 - **Estimate start from IP** is off until you turn it on. It asks ipwho.is
   for a city-level location only in Drive/Walk when weather has no coords
 - Arrow keys move through suggestions; Enter selects
-- Click the map (or **Expand** / **View all**) for a larger centered map
+- Click the map (or **Expand** / **View all**) for a larger top-down map
+- On driving or walking directions, drag the route line to send the path
+  through that point; drag a white point to move it, or click it to remove it
 - Drag to pan, scroll or use **+** / **−** to zoom; Escape closes the map
 - **Print** sends the turn-by-turn list to the default printer. If none is
   set up, it says so in the plugin instead of opening a browser
