@@ -129,6 +129,7 @@ Item {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: root.title
               color: root.foreground
@@ -139,6 +140,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: root.summary !== ""
               text: root.summary
@@ -244,6 +246,7 @@ Item {
           anchors.bottom: parent.bottom
 
           Text {
+            textFormat: Text.PlainText
             text: root.statusText !== ""
               ? root.statusText
               : "Drag to pan · scroll to zoom · © OpenStreetMap"
@@ -325,6 +328,7 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width - Style.space(86)
                   text: modelData.instruction
                   color: root.foreground
@@ -334,6 +338,7 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   visible: modelData.distance > 0
                   text: Model.formatDistance(modelData.distance, root.imperial)
                   color: Qt.darker(root.foreground, 1.5)

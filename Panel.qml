@@ -745,6 +745,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           visible: root.hint !== ""
           text: root.hint
@@ -784,6 +785,7 @@ Panel {
                 spacing: Style.space(1)
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   text: modelData.name
                   color: index === root.suggestionIndex
@@ -795,6 +797,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   visible: modelData.description !== ""
                   text: modelData.description
@@ -874,6 +877,7 @@ Panel {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width - Style.space(64)
                 text: modelData.instruction
                 color: root.contentForeground
@@ -883,6 +887,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 visible: modelData.distance > 0
                 text: Model.formatDistance(modelData.distance, root.imperial)
                 color: Qt.darker(root.contentForeground, 1.5)
