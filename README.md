@@ -1,5 +1,7 @@
 # QuickMap
 
+![QuickMap preview](preview.png)
+
 Look up an address or get driving and walking directions in a small Omarchy
 bar popup. Geocoding, routes, and map tiles come from OpenStreetMap services.
 An IP city estimate is available only after you turn it on. The bar icon does
