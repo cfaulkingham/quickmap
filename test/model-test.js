@@ -74,8 +74,8 @@ assert.strictEqual(Model.parseSearchResults(JSON.stringify([{
 
 const from = { lat: 38.8977, lon: -77.0365 }
 const to = { lat: 38.8899, lon: -77.0091 }
-assert.ok(Model.routeUrl("drive", from, to).indexOf("/route/v1/driving/") !== -1)
-assert.ok(Model.routeUrl("walk", from, to).indexOf("/route/v1/foot/") !== -1)
+assert.ok(Model.routeUrl("drive", from, to).indexOf("https://router.project-osrm.org/route/v1/driving/") === 0)
+assert.ok(Model.routeUrl("walk", from, to).indexOf("https://routing.openstreetmap.de/routed-foot/route/v1/foot/") === 0)
 const via = { lat: 38.89, lon: -77.02 }
 const viaUrl = Model.routeUrl("drive", from, to, [via])
 assert.ok(viaUrl.indexOf("-77.0365,38.8977;-77.02,38.89;-77.0091,38.8899") !== -1)

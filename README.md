@@ -62,8 +62,8 @@ omarchy bar move io.github.cfaulkingham.quickmap --section right
 
 ## Data
 
-Personal, light use of public HTTPS endpoints. Nominatim, OSRM, and tile
-requests send an identifying User-Agent. The IP estimate uses a User-Agent
+Personal, light use of public HTTPS endpoints. Nominatim, OSRM (drive and
+walk), and tile requests send an identifying User-Agent. The IP estimate uses a User-Agent
 without an email address. Tiles are cached in `~/.cache/quickmap/tiles`
 (or `$XDG_CACHE_HOME/quickmap/tiles` when that directory is under your home).
 After a view loads, neighboring tiles and the next zoom levels are fetched in
@@ -75,7 +75,8 @@ still need the internet.
 | Need | Service | When |
 | --- | --- | --- |
 | Address search | [Nominatim](https://nominatim.openstreetmap.org/) | You type a lookup |
-| Drive / walk routes | [OSRM](https://router.project-osrm.org/) | Drive or Walk with both ends set |
+| Drive routes | [OSRM](https://router.project-osrm.org/) | Drive with both ends set |
+| Walk routes | [FOSSGIS OSRM foot](https://routing.openstreetmap.de/) | Walk with both ends set |
 | Map tiles | [tile.openstreetmap.org](https://operations.osmfoundation.org/policies/tiles/) | A map is showing, or you cache offline |
 | Optional city-level IP estimate | [ipwho.is](https://ipwho.is/) | You turn on **Estimate start from IP** |
 

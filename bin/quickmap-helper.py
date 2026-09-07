@@ -54,12 +54,14 @@ MAX_ZOOM = 18
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
-OSRM = "https://router.project-osrm.org/route/v1"
+OSRM_DRIVE = "https://router.project-osrm.org/route/v1/driving"
+OSRM_WALK = "https://routing.openstreetmap.de/routed-foot/route/v1/foot"
 IPWHO = "https://ipwho.is/"
 TILE_HOST = "tile.openstreetmap.org"
 ALLOWED_HTTPS_HOSTS = frozenset({
     "nominatim.openstreetmap.org",
     "router.project-osrm.org",
+    "routing.openstreetmap.de",
     "ipwho.is",
     TILE_HOST,
     "www.openstreetmap.org",
@@ -599,9 +601,9 @@ def route_request_url(mode: str, coords: list[tuple[float, float]]) -> str:
         raise ValueError("invalid mode")
     if len(coords) < 2 or len(coords) > MAX_ROUTE_POINTS:
         raise ValueError("invalid waypoint count")
-    profile = "foot" if mode == "walk" else "driving"
+    base = OSRM_WALK if mode == "walk" else OSRM_DRIVE
     parts = ";".join(f"{lon},{lat}" for lat, lon in coords)
-    return f"{OSRM}/{profile}/{parts}?overview=simplified&geometries=geojson&steps=true"
+    return f"{base}/{parts}?overview=simplified&geometries=geojson&steps=true"
 
 
 def cmd_route(argv: list[str]) -> int:

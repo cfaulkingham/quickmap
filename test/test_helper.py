@@ -88,6 +88,7 @@ class UrlTests(unittest.TestCase):
     def test_https_allowlist(self):
         self.assertTrue(mod.allowed_url("https://nominatim.openstreetmap.org/search?q=a"))
         self.assertTrue(mod.allowed_url("https://router.project-osrm.org/route/v1/driving/0,0;1,1"))
+        self.assertTrue(mod.allowed_url("https://routing.openstreetmap.de/routed-foot/route/v1/foot/0,0;1,1"))
         self.assertTrue(mod.allowed_url("https://tile.openstreetmap.org/1/0/0.png"))
         self.assertTrue(mod.allowed_url("https://ipwho.is/"))
         self.assertFalse(mod.allowed_url("https://evil.example/"))
@@ -283,11 +284,11 @@ class HttpSizeTests(unittest.TestCase):
 class RouteUrlTests(unittest.TestCase):
     def test_two_points_and_via(self):
         two = mod.route_request_url("drive", [(38.9, -77.0), (38.8, -77.1)])
-        self.assertIn("/route/v1/driving/", two)
+        self.assertIn("https://router.project-osrm.org/route/v1/driving/", two)
         self.assertIn("-77.0,38.9;-77.1,38.8", two)
         self.assertIn("geometries=geojson", two)
         via = mod.route_request_url("walk", [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)])
-        self.assertIn("/route/v1/foot/", via)
+        self.assertIn("https://routing.openstreetmap.de/routed-foot/route/v1/foot/", via)
         self.assertIn("2.0,1.0;4.0,3.0;6.0,5.0", via)
 
     def test_rejects_bad_counts(self):

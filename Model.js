@@ -31,6 +31,8 @@ var MAX_QUERY_CHARS = 200
 var MAX_HELPER_STDOUT = MAX_ROUTE_BYTES
 var TILE_BASE_URL = "https://tile.openstreetmap.org"
 var OSM_OPEN_PREFIX = "https://www.openstreetmap.org/"
+var OSRM_DRIVE_PREFIX = "https://router.project-osrm.org/route/v1/driving"
+var OSRM_WALK_PREFIX = "https://routing.openstreetmap.de/routed-foot/route/v1/foot"
 var HELPER_NAME = "quickmap-helper.py"
 
 function userAgent() {
@@ -255,6 +257,10 @@ function routeProfile(mode) {
   return mode === "walk" ? "foot" : "driving"
 }
 
+function routeServiceUrl(mode) {
+  return mode === "walk" ? OSRM_WALK_PREFIX : OSRM_DRIVE_PREFIX
+}
+
 function validCoord(point) {
   if (!point) return false
   var lat = Number(point.lat)
@@ -288,7 +294,7 @@ function routeUrl(mode, from, to, vias) {
   var parts = []
   for (var i = 0; i < pts.length; i++)
     parts.push(Number(pts[i].lon) + "," + Number(pts[i].lat))
-  return "https://router.project-osrm.org/route/v1/" + routeProfile(mode)
+  return routeServiceUrl(mode)
     + "/" + parts.join(";") + "?overview=simplified&geometries=geojson&steps=true"
 }
 
@@ -1104,6 +1110,7 @@ if (typeof module !== "undefined") {
     parseLocationFile: parseLocationFile,
     parseIpLocation: parseIpLocation,
     routeProfile: routeProfile,
+    routeServiceUrl: routeServiceUrl,
     validCoord: validCoord,
     sanitizeVias: sanitizeVias,
     routePoints: routePoints,
