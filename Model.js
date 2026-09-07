@@ -558,6 +558,13 @@ function openUrl(place, origin, dest, mode, vias) {
   return isSafeOsmUrl(url) ? url : ""
 }
 
+function browserCommand(url) {
+  if (!isSafeOsmUrl(url)) return []
+  // omarchy-launch-browser uses uwsm-app and focuses the existing window.
+  // xdg-open can open a tab on another workspace with no visible change.
+  return ["/usr/bin/omarchy-launch-browser", url]
+}
+
 function helperPath(pluginDir) {
   var dir = String(pluginDir || "")
   if (!dir || dir.indexOf("\x00") >= 0) return ""
@@ -1136,6 +1143,7 @@ if (typeof module !== "undefined") {
     osmPlaceUrl: osmPlaceUrl,
     osmDirectionsUrl: osmDirectionsUrl,
     openUrl: openUrl,
+    browserCommand: browserCommand,
     isSafeOsmUrl: isSafeOsmUrl,
     helperPath: helperPath,
     helperCommand: helperCommand,

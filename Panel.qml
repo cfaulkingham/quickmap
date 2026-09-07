@@ -602,7 +602,9 @@ Panel {
 
   function openInOsm() {
     var url = Model.openUrl(root.place, root.effectiveOrigin, root.toPlace, root.mode, root.vias)
-    if (url) Quickshell.execDetached(["/usr/bin/xdg-open", "--", url])
+    if (!url) return
+    Quickshell.execDetached(["/usr/bin/omarchy-launch-browser", url])
+    root.close()
   }
 
   function setIpOptIn(on) {
