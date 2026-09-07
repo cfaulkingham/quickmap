@@ -76,8 +76,8 @@ Item {
     readonly property int cardHeight: Math.min(height - Style.space(40), Style.space(680))
     readonly property bool showSteps: root.steps && root.steps.length > 0
     readonly property int mapHeight: showSteps
-      ? Math.max(Style.space(240), Math.round(cardHeight * 0.52))
-      : Math.max(Style.space(280), cardHeight - Style.space(92))
+      ? Math.max(Style.space(200), Math.round(cardHeight * 0.44))
+      : Math.max(Style.space(200), cardHeight - Style.space(176))
 
     onVisibleChanged: if (visible) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
 
