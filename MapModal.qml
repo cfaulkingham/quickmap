@@ -60,6 +60,12 @@ Item {
     root.zoomRequested(-1, map.width / 2, map.height / 2)
   }
 
+  function handleMapWheel(wheel, item) {
+    var p = item ? map.mapFromItem(item, wheel.x, wheel.y) : { x: wheel.x, y: wheel.y }
+    if (map.consumeWheel(wheel, p.x, p.y))
+      wheel.accepted = true
+  }
+
   PanelWindow {
     id: window
     visible: root.opened
@@ -230,8 +236,10 @@ Item {
               }
               MouseArea {
                 anchors.fill: parent
+                hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.zoomIn()
+                onWheel: function(wheel) { root.handleMapWheel(wheel, this) }
               }
             }
 
@@ -252,8 +260,10 @@ Item {
               }
               MouseArea {
                 anchors.fill: parent
+                hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.zoomOut()
+                onWheel: function(wheel) { root.handleMapWheel(wheel, this) }
               }
             }
           }
@@ -271,7 +281,7 @@ Item {
             text: root.statusText !== ""
               ? root.statusText
               : (root.routeEditable
-                ? "Drag the route to change it · click a point to remove it · © OpenStreetMap"
+                ? "Drag the route to change it · scroll to zoom · © OpenStreetMap"
                 : "Drag to pan · scroll to zoom · © OpenStreetMap")
             color: Qt.darker(root.foreground, 1.6)
             font.family: root.fontFamily

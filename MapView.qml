@@ -32,6 +32,26 @@ Item {
   signal viaCommitted(int index, real lat, real lon, bool isNew)
   signal viaRemoved(int index)
 
+  property real wheelRemain: 0
+
+  function consumeWheel(wheel, ax, ay) {
+    if (!root.interactive) return false
+    if (wheel.phase === Qt.ScrollMomentum) return true
+    var dy = wheel.angleDelta.y
+    if (dy === 0) dy = wheel.pixelDelta.y * 8
+    dy = Number(dy)
+    if (!isFinite(dy) || dy === 0) return false
+    if (pointer.draggingVia) return true
+    if (root.wheelRemain !== 0 && (root.wheelRemain > 0) !== (dy > 0))
+      root.wheelRemain = 0
+    root.wheelRemain += dy
+    if (Math.abs(root.wheelRemain) < 120) return true
+    var d = root.wheelRemain > 0 ? 1 : -1
+    root.wheelRemain = 0
+    root.zoomRequested(d, ax, ay)
+    return true
+  }
+
   function paintOverlay() {
     var ctx = overlay.getContext("2d")
     if (!ctx) return
@@ -296,21 +316,19 @@ Item {
       viaHotIndex = -1
       overlay.requestPaint()
     }
-  }
 
-  WheelHandler {
-    enabled: root.interactive && !pointer.draggingVia
-    onWheel: function(event) {
-      var d = event.angleDelta.y > 0 ? 1 : (event.angleDelta.y < 0 ? -1 : 0)
-      if (d === 0) return
-      root.zoomRequested(d, event.position.x, event.position.y)
-      event.accepted = true
+    onWheel: function(wheel) {
+      if (root.consumeWheel(wheel, wheel.x, wheel.y))
+        wheel.accepted = true
     }
   }
 
   onWidthChanged: overlay.requestPaint()
   onHeightChanged: overlay.requestPaint()
-  onViewChanged: overlay.requestPaint()
+  onViewChanged: {
+    root.wheelRemain = 0
+    overlay.requestPaint()
+  }
   onMarkersChanged: overlay.requestPaint()
   onRouteChanged: overlay.requestPaint()
   onViasChanged: overlay.requestPaint()
